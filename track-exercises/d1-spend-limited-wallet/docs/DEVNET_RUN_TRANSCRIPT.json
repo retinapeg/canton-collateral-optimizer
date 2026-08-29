@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-08-29T14:41:09Z",
+  "sanitized": true,
+  "credentialsIncluded": false,
+  "proofScope": "CORE_CLI_BASE_ONLY",
+  "finalReleaseProof": false,
+  "targetMode": "SANDBOX",
+  "environment": {
+    "C8_BASE": "UNSET",
+    "C8_IDP": "UNSET",
+    "C8_CLIENT_ID": "UNSET",
+    "C8_CLIENT_SECRET": "UNSET",
+    "C8_REGISTRY": "UNSET"
+  },
+  "gates": {
+    "dpmBuild": "PASS",
+    "dpmTest": "PASS",
+    "packageUpload": "PASS"
+  },
+  "dar": {
+    "packageName": "d1-spend-limited-wallet",
+    "packageVersion": "0.0.1",
+    "runDemoUploadResult": "uploaded",
+    "synchronizerSelection": "participant_metadata",
+    "packageStatus": "PACKAGE_STATUS_REGISTERED"
+  },
+  "partyRoles": [
+    "Owner",
+    "Agent",
+    "Merchant-A",
+    "Merchant-B"
+  ],
+  "successfulUpdates": {
+    "proposal": "COMMITTED",
+    "accept": "COMMITTED",
+    "charge30": "COMMITTED",
+    "revoke": "COMMITTED"
+  },
+  "deliberateLedgerRejections": [
+    {
+      "attack": "Merchant-A 80 after spending 30",
+      "httpStatus": 400,
+      "ledgerCode": "DAML_FAILURE",
+      "errorCategory": 9,
+      "grpcCodeValue": 9,
+      "assertion": "charge would exceed the cap"
+    },
+    {
+      "attack": "Merchant-B 10",
+      "httpStatus": 400,
+      "ledgerCode": "DAML_FAILURE",
+      "errorCategory": 9,
+      "grpcCodeValue": 9,
+      "assertion": "counterparty is not allow-listed"
+    },
+    {
+      "attack": "Merchant-A 1 after owner revocation",
+      "httpStatus": 404,
+      "ledgerCode": "CONTRACT_NOT_FOUND",
+      "errorCategory": 11,
+      "grpcCodeValue": 5
+    }
+  ],
+  "finalProof": {
+    "successfulChargeAmount": "30.0000000000",
+    "remainingAllowanceBeforeRevocation": "70.0000000000",
+    "auditRecordCount": 1,
+    "failedChargesCreatedAuditRecords": false
+  },
+  "command": "./scripts/demo_devnet.sh",
+  "unresolvedBlocker": "This is pre-final core-base sandbox evidence. DevNet variables were unset, and the final Settlement.Mandate:Charge adapter and fresh combined-DAR proof remain pending."
+}

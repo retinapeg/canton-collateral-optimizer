@@ -1,2 +1,8 @@
 /.daml/
 /log/
+/.env
+/.env.*
+!/.env.example
+/.wallet_cli_state.json
+/.wallet_cli_state.json.tmp
+/scripts/__pycache__/
