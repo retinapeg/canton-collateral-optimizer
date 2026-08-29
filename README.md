@@ -438,7 +438,7 @@ The backend deliberately uses only a small JSON Ledger API v2 surface:
 - `GET /v2/parties`
 - `POST /v2/parties`
 - `POST /v2/state/active-contracts-page`
-- `POST /v2/commands/submit-and-wait`
+- `POST /v2/commands/submit-and-wait-for-transaction`
 
 The DAR is supplied directly to `dpm sandbox`, so no separate package-upload
 endpoint is required.

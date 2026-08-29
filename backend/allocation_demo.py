@@ -174,7 +174,7 @@ def format_transaction_receipt(
         f"FROM: {source}",
         f"TO: {recipient}",
         f"ACTION: {action}",
-        f"Canton updateId: {transaction['updateId']}",
+        f"UPDATE ID (TXID equivalent): {transaction['updateId']}",
     ]
     command_id = transaction.get("commandId")
     if isinstance(command_id, str) and command_id:

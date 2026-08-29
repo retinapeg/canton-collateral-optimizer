@@ -309,11 +309,11 @@ class AllocationLedgerFlowTests(unittest.TestCase):
         self.assertEqual(receipt_text.count("TO: Bank B"), 2)
         self.assertNotIn("TO: Bank C", receipt_text)
         self.assertIn(
-            "Canton updateId: create-update-proposal-1",
+            "UPDATE ID (TXID equivalent): create-update-proposal-1",
             receipt_text,
         )
         self.assertIn(
-            "Canton updateId: accept-update-allocation-2",
+            "UPDATE ID (TXID equivalent): accept-update-allocation-2",
             receipt_text,
         )
         self.assertNotIn("create-update-proposal-3", receipt_text)
@@ -332,9 +332,20 @@ class AllocationLedgerFlowTests(unittest.TestCase):
         client = FakeCantonClient(
             unauthorized_error="Cannot reach Canton at http://test: connection lost"
         )
+        messages: list[str] = []
 
         with self.assertRaisesRegex(LedgerApiError, "Cannot reach Canton"):
-            run_ledger_flow(client, self.instructions, emit=lambda _: None)
+            run_ledger_flow(client, self.instructions, emit=messages.append)
+
+        receipt_text = "\n".join(
+            message
+            for message in messages
+            if "✅ CANTON / DAML TRANSACTION COMMITTED" in message
+        )
+        self.assertEqual(
+            receipt_text.count("✅ CANTON / DAML TRANSACTION COMMITTED"), 1
+        )
+        self.assertNotIn("AllocationProposal.Accept", receipt_text)
 
     def test_reconciliation_rejects_an_unexpected_prefix_allocation(self) -> None:
         client = FakeCantonClient(add_unexpected_allocation=True)
@@ -385,7 +396,7 @@ class TransactionReceiptTests(unittest.TestCase):
                     "FROM: Bank A",
                     "TO: Bank B",
                     "ACTION: #collateral-optimizer:CollateralAllocation:AllocationProposal",
-                    "Canton updateId: actual-update-id-from-canton",
+                    "UPDATE ID (TXID equivalent): actual-update-id-from-canton",
                     "COMMAND ID: actual-command-id-from-canton",
                     "LEDGER OFFSET: 42",
                     "CREATED CONTRACT ID: actual-created-contract-id",
@@ -418,7 +429,7 @@ class TransactionReceiptTests(unittest.TestCase):
             action="AllocationProposal.Accept",
         )
 
-        self.assertIn("Canton updateId: tree-update-id", receipt)
+        self.assertIn("UPDATE ID (TXID equivalent): tree-update-id", receipt)
         self.assertIn("CREATED CONTRACT ID: tree-created-contract-id", receipt)
         self.assertNotIn("COMMAND ID:", receipt)
         self.assertNotIn("LEDGER OFFSET:", receipt)
@@ -438,6 +449,24 @@ class TransactionReceiptTests(unittest.TestCase):
         self.assertEqual(
             created_contract_ids(transaction), ("tree-map-contract-id",)
         )
+
+    def test_transaction_without_a_create_omits_contract_id_line(self) -> None:
+        receipt = format_transaction_receipt(
+            {
+                "transaction": {
+                    "updateId": "archive-only-update",
+                    "events": [
+                        {"ArchivedEvent": {"contractId": "archived-contract"}}
+                    ],
+                }
+            },
+            source="Bank A",
+            recipient="Bank B",
+            action="AllocationProposal.Archive",
+        )
+
+        self.assertNotIn("CREATED CONTRACT ID:", receipt)
+        self.assertIn("STATUS: COMMITTED", receipt)
 
     def test_missing_update_id_is_rejected_instead_of_invented(self) -> None:
         with self.assertRaisesRegex(LedgerApiError, "transaction.updateId"):
