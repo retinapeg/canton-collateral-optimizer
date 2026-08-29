@@ -1,6 +1,7 @@
 module Demo where
 
 import Collateral
+import qualified CollateralAllocation as Bilateral
 import DA.Optional (isNone)
 import Daml.Script
 
@@ -75,11 +76,90 @@ setup = script do
   _ <- createRequirementB parties
   pure ()
 
--- Executable proof of disclosure, control, stale-state protection and the
--- acceptance state transition.  `dpm test` runs it on the IDE ledger; the same
--- script can also be submitted to a live Canton Sandbox.
+-- The visible bilateral smart-contract demo. Bank A creates a real proposal,
+-- Bank B observes and accepts it, and the resulting allocation remains active.
 privacyAndAcceptance : Script ()
 privacyAndAcceptance = script do
+  debugRaw "=================================================="
+  debugRaw "CANTON COLLATERAL ALLOCATION"
+  debugRaw "=================================================="
+
+  bankA <- allocatePartyByHint (PartyIdHint "BankA")
+  bankB <- allocatePartyByHint (PartyIdHint "BankB")
+
+  debugRaw ""
+  debugRaw "BANK A"
+  debugRaw "Asset available: UK_GILT_2035"
+  debugRaw "Proposed allocation: 30"
+
+  proposalCid <- submit bankA do
+    createCmd Bilateral.AllocationProposal with
+      source = bankA
+      recipient = bankB
+      asset = "UK_GILT_2035"
+      quantity = 30.0
+      allocationReference = "optimizer-allocation-001"
+
+  debugRaw ""
+  debugRaw "SMART CONTRACT CREATED"
+  debugRaw "BankA -> BankB"
+  debugRaw "Asset: UK_GILT_2035"
+  debugRaw "Quantity: 30"
+  debugRaw "Reference: optimizer-allocation-001"
+
+  Some proposalForBankB <- queryContractId bankB proposalCid
+  assert (proposalForBankB.source == bankA)
+  assert (proposalForBankB.recipient == bankB)
+  assert (proposalForBankB.asset == "UK_GILT_2035")
+  assert (proposalForBankB.quantity == 30.0)
+  assert
+    (proposalForBankB.allocationReference == "optimizer-allocation-001")
+
+  debugRaw ""
+  debugRaw "BANK B"
+  debugRaw "Proposal visible: YES"
+
+  -- Bank A is the proposal signatory, but only Bank B controls Accept.
+  submitMustFail bankA do
+    exerciseCmd proposalCid Bilateral.Accept
+
+  debugRaw "Accepting allocation..."
+  allocationCid <- submit bankB do
+    exerciseCmd proposalCid Bilateral.Accept
+
+  debugRaw ""
+  debugRaw "SMART CONTRACT ACCEPTED"
+
+  proposalAfterAcceptance <- queryContractId bankB proposalCid
+  assert (isNone proposalAfterAcceptance)
+
+  Some allocationForBankB <- queryContractId bankB allocationCid
+  Some allocationForBankA <- queryContractId bankA allocationCid
+  assert (allocationForBankB == allocationForBankA)
+  assert (allocationForBankB.source == bankA)
+  assert (allocationForBankB.recipient == bankB)
+  assert (allocationForBankB.asset == "UK_GILT_2035")
+  assert (allocationForBankB.quantity == 30.0)
+  assert
+    (allocationForBankB.allocationReference == "optimizer-allocation-001")
+
+  debugRaw ""
+  debugRaw "BANK B RECEIVED ALLOCATION"
+  debugRaw "30 UK_GILT_2035"
+  debugRaw ""
+  debugRaw "LEDGER RESULT"
+  debugRaw "[PASS] Proposal created by Bank A"
+  debugRaw "[PASS] Bank B observed proposal"
+  debugRaw "[PASS] Bank B accepted"
+  debugRaw "[PASS] Accepted allocation contract active"
+  debugRaw "[PASS] Bank A could not accept on Bank B's behalf"
+  debugRaw ""
+  debugRaw "=================================================="
+
+-- The original optimiser/Allocator/CCP proof is retained as a separate test so
+-- its disclosure, controller, residual-offer and stale-state coverage remains.
+optimizerPrivacyAndAcceptance : Script ()
+optimizerPrivacyAndAcceptance = script do
   parties <- allocateDemoParties
   offerA <- createOfferA parties
   offerB <- createOfferB parties
