@@ -369,7 +369,7 @@ unset.
 | No TCP/HTTP response | `LEDGER_UNREACHABLE` | Check target availability and `C8_BASE` without printing its value. |
 | HTTP 401 | `AUTHENTICATION` | Refresh/fix credentials; never paste the token into output. |
 | HTTP 403 | `AUTHORIZATION` | Inspect user rights and selected party; verify `CanActAs`. |
-| Party has `isLocal: false` | `NOT_LOCAL_PARTY` | Select/reuse a local hint; do not submit. |
+| Party has `isLocal: false` | `NON_LOCAL_PARTY` | Select/reuse a local hint; do not submit. |
 | Party hint already exists | Not an error | Reuse the local party. |
 | `KNOWN_PACKAGE_VERSION` | `PACKAGE_VERSION_COLLISION` | Ask the Daml owner for the smallest patch-version bump, rebuild, and retest. |
 | Expected attack commits | `ATTACK_UNEXPECTEDLY_SUCCEEDED` | Preserve sanitized evidence and escalate to the Daml owner. |

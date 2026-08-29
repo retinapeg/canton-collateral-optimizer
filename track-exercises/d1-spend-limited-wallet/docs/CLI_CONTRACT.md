@@ -34,8 +34,10 @@ Python binary floating-point cannot change them.
 
 ## Process contract
 
-Every handled invocation writes exactly one UTF-8 JSON object followed by a
-newline to standard output.
+Every canonical command invocation and every handled command failure writes
+exactly one UTF-8 JSON object followed by a newline to standard output. The
+argument parser's built-in `--help` display is informational text outside the
+ten-command machine contract.
 
 - Exit `0` means the command completed and the top-level `ok` value is `true`.
 - Exit `1` means a usage, configuration, transport, authentication,
@@ -277,6 +279,7 @@ by `health` in aggregate and by `setup-demo` for each selected demo party.
 
 ```json
 {
+  "count": 1,
   "parties": [
     {
       "party": "Owner::<participant-namespace>",
