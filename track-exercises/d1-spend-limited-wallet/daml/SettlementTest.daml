@@ -442,6 +442,69 @@ testRoleAliasCannotCreatePermissionOrAudit = script do
   assert (length audits == 0)
 
 
+-- Reject an empty internal instrument identifier at issuance and at both
+-- permission boundaries. Without these early invariants, an empty-id mandate
+-- could be accepted but every valid Charge would later roll back when the
+-- stricter ChargeRecord precondition rejected its audit consequence.
+testEmptyAssetIdCannotCreateSettlementContext : Script ()
+testEmptyAssetIdCannotCreateSettlementContext = script do
+  parties <- allocateTestParties
+  now <- getTime
+  let deadline = addRelTime now (hours 24)
+
+  submitMustFail parties.bank do
+    createCmd DemoAsset with
+      issuer = parties.bank
+      holder = parties.owner
+      viewer = parties.agent
+      assetId = ""
+      amount = 100.0
+
+  validAssetCid <- issueAsset parties 100.0
+
+  submitMustFail parties.owner do
+    createCmd MandateProposal with
+      owner = parties.owner
+      agent = parties.agent
+      mandateId = "EMPTY-ASSET-ID-PROPOSAL"
+      cap = 100.0
+      expiresAt = deadline
+      allowedMerchants = [parties.merchant]
+      assetIssuer = parties.bank
+      assetId = ""
+      assetAmount = 100.0
+      assetCid = validAssetCid
+
+  submitMustFail (actAs [parties.owner, parties.agent]) do
+    createCmd Mandate with
+      owner = parties.owner
+      agent = parties.agent
+      mandateId = "EMPTY-ASSET-ID-MANDATE"
+      cap = 100.0
+      spent = 0.0
+      expiresAt = deadline
+      allowedMerchants = [parties.merchant]
+      assetIssuer = parties.bank
+      assetId = ""
+      initialAssetAmount = 100.0
+      assetBalance = 100.0
+      assetCid = Some validAssetCid
+
+  Some unchangedAsset <- queryContractId parties.owner validAssetCid
+  proposals <- query @MandateProposal parties.owner
+  mandates <- query @Mandate parties.owner
+  audits <- query @ChargeRecord parties.owner
+  merchantAssets <- query @DemoAsset parties.merchant
+  issuerAssets <- query @DemoAsset parties.bank
+  assert (unchangedAsset.assetId == "DEMO-GBP")
+  assert (unchangedAsset.amount == 100.0)
+  assert (length proposals == 0)
+  assert (length mandates == 0)
+  assert (length audits == 0)
+  assert (length merchantAssets == 0)
+  assert (length issuerAssets == 1)
+
+
 -- Literal release attack sequence for the settlement path. The sole accepted
 -- Charge moves 30 out of the issuer's original 100, leaving 70 with the owner
 -- and zero with Merchant-B. Every rejected transaction is followed by ledger

@@ -28,7 +28,7 @@ template DemoAsset
     assetId : Text
     amount  : Decimal
   where
-    ensure amount > 0.0
+    ensure assetId /= "" && amount > 0.0
 
     signatory issuer
     observer holder, viewer
@@ -96,6 +96,7 @@ template Mandate
       && spent >= 0.0
       && spent <= cap
       && mandateId /= ""
+      && assetId /= ""
       && initialAssetAmount > 0.0
       && assetBalance >= 0.0
       && spent + assetBalance == initialAssetAmount
@@ -260,6 +261,7 @@ template MandateProposal
       owner /= agent
       && cap > 0.0
       && mandateId /= ""
+      && assetId /= ""
       && assetAmount > 0.0
 
     signatory owner
