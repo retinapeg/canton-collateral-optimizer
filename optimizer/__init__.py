@@ -1,5 +1,5 @@
 """Ledger-independent collateral optimisation package."""
 
-from .engine import optimize_collateral
+from .engine import AllocationResult, optimize_allocation, optimize_collateral
 
-__all__ = ["optimize_collateral"]
+__all__ = ["AllocationResult", "optimize_allocation", "optimize_collateral"]

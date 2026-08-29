@@ -4,7 +4,7 @@ import unittest
 import json
 from pathlib import Path
 
-from optimizer.engine import optimize_collateral
+from optimizer.engine import optimize_allocation, optimize_collateral
 
 
 def asset(
@@ -47,6 +47,59 @@ def requirement(
 
 
 class OptimizerTests(unittest.TestCase):
+    def test_global_allocator_beats_greedy_counterexample(self) -> None:
+        supplies = {"Asset1": 1.0, "Asset2": 1.0}
+        demands = {"InstitutionB": 1.0, "InstitutionC": 1.0}
+        costs = {
+            "Asset1": {"InstitutionB": 1.0, "InstitutionC": 2.0},
+            "Asset2": {"InstitutionB": 1.1, "InstitutionC": 100.0},
+        }
+        haircuts = {
+            asset_id: {destination_id: 0.0 for destination_id in demands}
+            for asset_id in supplies
+        }
+        eligibility = {
+            asset_id: {destination_id: True for destination_id in demands}
+            for asset_id in supplies
+        }
+
+        greedy_local_cost = (
+            costs["Asset1"]["InstitutionB"]
+            + costs["Asset2"]["InstitutionC"]
+        )
+        result = optimize_allocation(
+            supplies=supplies,
+            demands=demands,
+            costs=costs,
+            haircuts=haircuts,
+            eligibility=eligibility,
+        )
+
+        self.assertEqual(greedy_local_cost, 101.0)
+        self.assertTrue(result.success, result.message)
+        self.assertEqual(result.status, "OPTIMAL")
+        self.assertAlmostEqual(result.total_cost, 3.1, places=9)
+        self.assertAlmostEqual(
+            result.allocations["Asset2"]["InstitutionB"], 1.0, places=9
+        )
+        self.assertAlmostEqual(
+            result.allocations["Asset1"]["InstitutionC"], 1.0, places=9
+        )
+
+        for asset_id, supply in supplies.items():
+            allocated = sum(result.allocations[asset_id].values())
+            self.assertLessEqual(allocated, supply + 1e-9)
+        for destination_id, demand in demands.items():
+            effective_value = sum(
+                (1.0 - haircuts[asset_id][destination_id])
+                * result.allocations[asset_id][destination_id]
+                for asset_id in supplies
+            )
+            self.assertGreaterEqual(effective_value + 1e-9, demand)
+        for allocations_by_destination in result.allocations.values():
+            for allocated in allocations_by_destination.values():
+                self.assertGreaterEqual(allocated, 0.0)
+
     def test_sample_market_has_the_expected_deterministic_solution(self) -> None:
         sample_path = Path(__file__).parents[1] / "sample_data" / "market.json"
         with sample_path.open(encoding="utf-8") as handle:

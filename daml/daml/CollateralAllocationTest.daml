@@ -1,0 +1,53 @@
+module CollateralAllocationTest where
+
+import CollateralAllocation
+import Daml.Script
+
+allocationLifecycle : Script ()
+allocationLifecycle = script do
+  bankA <- allocatePartyByHint (PartyIdHint "BankA")
+  bankB <- allocatePartyByHint (PartyIdHint "BankB")
+
+  proposalCid <- submit bankA do
+    createCmd AllocationProposal with
+      source = bankA
+      recipient = bankB
+      asset = "UK_GILT_2035"
+      quantity = 30.0
+      allocationReference = "optimizer-allocation-001"
+
+  bankBProposals <- query @AllocationProposal bankB
+  assert (length bankBProposals == 1)
+
+  -- Bank A signed the proposal but cannot exercise Bank B's choice.
+  submitMustFail bankA do
+    exerciseCmd proposalCid Accept
+
+  allocationCid <- submit bankB do
+    exerciseCmd proposalCid Accept
+
+  Some allocationForBankB <- queryContractId bankB allocationCid
+  Some allocationForBankA <- queryContractId bankA allocationCid
+  assert (allocationForBankB == allocationForBankA)
+  assert (allocationForBankB.quantity == 30.0)
+  assert (allocationForBankB.asset == "UK_GILT_2035")
+  assert (allocationForBankB.source == bankA)
+  assert (allocationForBankB.recipient == bankB)
+  assert
+    (allocationForBankB.allocationReference == "optimizer-allocation-001")
+
+  submitMustFail bankA do
+    createCmd AllocationProposal with
+      source = bankA
+      recipient = bankB
+      asset = "UK_GILT_2035"
+      quantity = 0.0
+      allocationReference = "zero-quantity"
+
+  submitMustFail bankA do
+    createCmd AllocationProposal with
+      source = bankA
+      recipient = bankB
+      asset = "UK_GILT_2035"
+      quantity = -1.0
+      allocationReference = "negative-quantity"

@@ -1,0 +1,44 @@
+module CollateralAllocation where
+
+-- The accepted bilateral allocation recorded on the ledger.
+template AllocatedCollateral
+  with
+    source : Party
+    recipient : Party
+    asset : Text
+    quantity : Decimal
+    allocationReference : Text
+  where
+    signatory source, recipient
+
+    ensure
+      asset /= ""
+      && quantity > 0.0
+      && allocationReference /= ""
+
+-- Bank A proposes; Bank B sees the proposal and alone decides whether to accept.
+template AllocationProposal
+  with
+    source : Party
+    recipient : Party
+    asset : Text
+    quantity : Decimal
+    allocationReference : Text
+  where
+    signatory source
+    observer recipient
+
+    ensure
+      asset /= ""
+      && quantity > 0.0
+      && allocationReference /= ""
+
+    choice Accept : ContractId AllocatedCollateral
+      controller recipient
+      do
+        create AllocatedCollateral with
+          source
+          recipient
+          asset
+          quantity
+          allocationReference

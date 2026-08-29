@@ -8,6 +8,7 @@ backend obtains its authorised ledger view.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from math import fsum, isfinite
 from numbers import Real
 from typing import Any
@@ -18,6 +19,17 @@ from scipy.optimize import linprog
 
 _FEASIBILITY_ABSOLUTE_TOLERANCE = 1e-9
 _FEASIBILITY_RELATIVE_TOLERANCE = 1e-12
+
+
+@dataclass(frozen=True)
+class AllocationResult:
+    """Plain-Python result from the ledger-independent allocation LP."""
+
+    success: bool
+    total_cost: float | None
+    allocations: dict[str, dict[str, float]]
+    status: str
+    message: str
 
 
 def _required_text(item: Mapping[str, Any], field: str, kind: str) -> str:
@@ -155,6 +167,259 @@ def _coverage_is_satisfied(allocated: float, required: float) -> bool:
     return allocated + tolerance >= required
 
 
+def _normalise_amounts(
+    values: Mapping[str, Real], name: str, *, require_values: bool
+) -> dict[str, float]:
+    if not isinstance(values, Mapping):
+        raise ValueError(f"{name} must be an object")
+    if require_values and not values:
+        raise ValueError(f"{name} must contain at least one entry")
+
+    normalised: dict[str, float] = {}
+    for key, value in values.items():
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError(f"{name} keys must be non-empty strings")
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise ValueError(f"{name}[{key!r}] must be a finite number")
+        number = float(value)
+        if not isfinite(number):
+            raise ValueError(f"{name}[{key!r}] must be a finite number")
+        if number < 0:
+            raise ValueError(f"{name}[{key!r}] cannot be negative")
+        normalised[key] = number
+    return normalised
+
+
+def _normalise_numeric_matrix(
+    matrix: Mapping[str, Mapping[str, Real]],
+    name: str,
+    row_ids: Sequence[str],
+    column_ids: Sequence[str],
+    *,
+    haircut: bool = False,
+) -> dict[str, dict[str, float]]:
+    if not isinstance(matrix, Mapping):
+        raise ValueError(f"{name} must be an object")
+
+    normalised: dict[str, dict[str, float]] = {}
+    for row_id in row_ids:
+        row = matrix.get(row_id)
+        if not isinstance(row, Mapping):
+            raise ValueError(f"{name}[{row_id!r}] must be an object")
+        normalised[row_id] = {}
+        for column_id in column_ids:
+            value = row.get(column_id)
+            if isinstance(value, bool) or not isinstance(value, Real):
+                raise ValueError(
+                    f"{name}[{row_id!r}][{column_id!r}] must be a finite number"
+                )
+            number = float(value)
+            if not isfinite(number):
+                raise ValueError(
+                    f"{name}[{row_id!r}][{column_id!r}] must be a finite number"
+                )
+            if haircut and not 0.0 <= number <= 1.0:
+                raise ValueError(
+                    f"{name}[{row_id!r}][{column_id!r}] must be in [0, 1]"
+                )
+            normalised[row_id][column_id] = number
+    return normalised
+
+
+def _normalise_eligibility(
+    matrix: Mapping[str, Mapping[str, bool]],
+    asset_ids: Sequence[str],
+    destination_ids: Sequence[str],
+) -> dict[str, dict[str, bool]]:
+    if not isinstance(matrix, Mapping):
+        raise ValueError("eligibility must be an object")
+
+    normalised: dict[str, dict[str, bool]] = {}
+    for asset_id in asset_ids:
+        row = matrix.get(asset_id)
+        if not isinstance(row, Mapping):
+            raise ValueError(f"eligibility[{asset_id!r}] must be an object")
+        normalised[asset_id] = {}
+        for destination_id in destination_ids:
+            value = row.get(destination_id)
+            if not isinstance(value, bool):
+                raise ValueError(
+                    f"eligibility[{asset_id!r}][{destination_id!r}] must be a boolean"
+                )
+            normalised[asset_id][destination_id] = value
+    return normalised
+
+
+def _empty_allocation_matrix(
+    asset_ids: Sequence[str], destination_ids: Sequence[str]
+) -> dict[str, dict[str, float]]:
+    return {
+        asset_id: {destination_id: 0.0 for destination_id in destination_ids}
+        for asset_id in asset_ids
+    }
+
+
+def optimize_allocation(
+    *,
+    supplies: Mapping[str, Real],
+    demands: Mapping[str, Real],
+    costs: Mapping[str, Mapping[str, Real]],
+    haircuts: Mapping[str, Mapping[str, Real]],
+    eligibility: Mapping[str, Mapping[str, bool]],
+) -> AllocationResult:
+    """Minimise global collateral cost with one linear programme.
+
+    ``allocations[asset][destination]`` is x[i,j].  Ineligible pairs are kept
+    at zero through fixed LP bounds.  This function has no wallet, Daml, Canton,
+    mandate, or authorisation responsibilities.
+    """
+
+    normalised_supplies = _normalise_amounts(
+        supplies, "supplies", require_values=False
+    )
+    normalised_demands = _normalise_amounts(
+        demands, "demands", require_values=True
+    )
+    asset_ids = list(normalised_supplies)
+    destination_ids = list(normalised_demands)
+    normalised_costs = _normalise_numeric_matrix(
+        costs, "costs", asset_ids, destination_ids
+    )
+    normalised_haircuts = _normalise_numeric_matrix(
+        haircuts,
+        "haircuts",
+        asset_ids,
+        destination_ids,
+        haircut=True,
+    )
+    normalised_eligibility = _normalise_eligibility(
+        eligibility, asset_ids, destination_ids
+    )
+    empty_allocations = _empty_allocation_matrix(asset_ids, destination_ids)
+
+    if not asset_ids:
+        return AllocationResult(
+            success=False,
+            total_cost=None,
+            allocations=empty_allocations,
+            status="INFEASIBLE",
+            message="No collateral assets are available",
+        )
+
+    pairs = [
+        (asset_id, destination_id)
+        for asset_id in asset_ids
+        for destination_id in destination_ids
+    ]
+    objective = np.array(
+        [normalised_costs[asset_id][destination_id] for asset_id, destination_id in pairs],
+        dtype=float,
+    )
+
+    constraint_rows: list[list[float]] = []
+    constraint_bounds: list[float] = []
+
+    # Sum_j x[i,j] <= supply[i].
+    for asset_id in asset_ids:
+        constraint_rows.append(
+            [1.0 if pair_asset == asset_id else 0.0 for pair_asset, _ in pairs]
+        )
+        constraint_bounds.append(normalised_supplies[asset_id])
+
+    # linprog accepts <= rows, so negate each required-coverage constraint.
+    for destination_id in destination_ids:
+        constraint_rows.append(
+            [
+                -(1.0 - normalised_haircuts[pair_asset][pair_destination])
+                if pair_destination == destination_id
+                else 0.0
+                for pair_asset, pair_destination in pairs
+            ]
+        )
+        constraint_bounds.append(-normalised_demands[destination_id])
+
+    bounds = [
+        (0.0, None)
+        if normalised_eligibility[asset_id][destination_id]
+        else (0.0, 0.0)
+        for asset_id, destination_id in pairs
+    ]
+    solution = linprog(
+        c=objective,
+        A_ub=np.array(constraint_rows, dtype=float),
+        b_ub=np.array(constraint_bounds, dtype=float),
+        bounds=bounds,
+        method="highs",
+        options={
+            "primal_feasibility_tolerance": 1e-10,
+            "dual_feasibility_tolerance": 1e-10,
+        },
+    )
+
+    if solution.status == 2:
+        return AllocationResult(
+            success=False,
+            total_cost=None,
+            allocations=empty_allocations,
+            status="INFEASIBLE",
+            message="Available eligible collateral cannot satisfy all demands",
+        )
+    if not solution.success:
+        return AllocationResult(
+            success=False,
+            total_cost=None,
+            allocations=empty_allocations,
+            status="ERROR",
+            message=solution.message,
+        )
+
+    allocations = _empty_allocation_matrix(asset_ids, destination_ids)
+    for asset_id in asset_ids:
+        remaining = normalised_supplies[asset_id]
+        for pair_index, (pair_asset, destination_id) in enumerate(pairs):
+            if pair_asset != asset_id:
+                continue
+            if not normalised_eligibility[asset_id][destination_id]:
+                quantity = 0.0
+            else:
+                raw_quantity = max(0.0, float(solution.x[pair_index]))
+                quantity = min(raw_quantity, remaining)
+            allocations[asset_id][destination_id] = quantity
+            remaining = max(0.0, remaining - quantity)
+
+    for destination_id in destination_ids:
+        allocated_effective_value = fsum(
+            (1.0 - normalised_haircuts[asset_id][destination_id])
+            * allocations[asset_id][destination_id]
+            for asset_id in asset_ids
+        )
+        if not _coverage_is_satisfied(
+            allocated_effective_value, normalised_demands[destination_id]
+        ):
+            return AllocationResult(
+                success=False,
+                total_cost=None,
+                allocations=empty_allocations,
+                status="INFEASIBLE",
+                message=(
+                    "Solver output is not feasible after enforcing exact supply bounds"
+                ),
+            )
+
+    total_cost = fsum(
+        normalised_costs[asset_id][destination_id]
+        * allocations[asset_id][destination_id]
+        for asset_id, destination_id in pairs
+    )
+    return AllocationResult(
+        success=True,
+        total_cost=float(total_cost),
+        allocations=allocations,
+        status="OPTIMAL",
+        message="Optimal collateral allocation found",
+    )
+
+
 def _clip_solution_to_availability(
     raw_quantities: Sequence[float],
     pairs: list[tuple[int, int]],
@@ -208,58 +473,75 @@ def optimize_collateral(market: Mapping[str, Any]) -> dict[str, Any]:
                 f"No eligible collateral for {requirement_row['requirement_id']}"
             )
 
-    objective = np.array(
-        [assets[asset_index]["opportunity_cost"] for asset_index, _ in pairs],
-        dtype=float,
-    )
-
-    constraint_rows: list[list[float]] = []
-    constraint_bounds: list[float] = []
-
-    # Sum_j x_ij <= q_i: one row per asset prevents double allocation.
-    for asset_index, asset_row in enumerate(assets):
-        constraint_rows.append(
-            [1.0 if pair_asset == asset_index else 0.0 for pair_asset, _ in pairs]
+    asset_ids = [asset_row["asset_id"] for asset_row in assets]
+    requirement_ids = [
+        requirement_row["requirement_id"] for requirement_row in requirements
+    ]
+    supplies = {
+        asset_row["asset_id"]: (
+            asset_row["available_quantity"] * asset_row["market_value"]
         )
-        constraint_bounds.append(asset_row["available_quantity"])
+        for asset_row in assets
+    }
+    demands = {
+        requirement_row["requirement_id"]: requirement_row[
+            "required_effective_value"
+        ]
+        for requirement_row in requirements
+    }
+    costs = {
+        asset_row["asset_id"]: {
+            requirement_id: (
+                asset_row["opportunity_cost"] / asset_row["market_value"]
+            )
+            for requirement_id in requirement_ids
+        }
+        for asset_row in assets
+    }
+    haircuts = {
+        asset_row["asset_id"]: {
+            requirement_id: asset_row["haircut"]
+            for requirement_id in requirement_ids
+        }
+        for asset_row in assets
+    }
+    eligibility = {
+        asset_row["asset_id"]: {
+            requirement_row["requirement_id"]: _is_eligible(
+                asset_row, requirement_row
+            )
+            for requirement_row in requirements
+        }
+        for asset_row in assets
+    }
 
-    # linprog accepts <= rows, so multiply collateral coverage constraints by -1.
-    for requirement_index, requirement_row in enumerate(requirements):
-        constraint_rows.append(
-            [
-                -assets[pair_asset]["effective_value_per_unit"]
-                if pair_requirement == requirement_index
-                else 0.0
-                for pair_asset, pair_requirement in pairs
-            ]
-        )
-        constraint_bounds.append(-requirement_row["required_effective_value"])
-
-    solution = linprog(
-        c=objective,
-        A_ub=np.array(constraint_rows, dtype=float),
-        b_ub=np.array(constraint_bounds, dtype=float),
-        bounds=[(0.0, None)] * len(pairs),
-        method="highs",
-        options={
-            "primal_feasibility_tolerance": 1e-10,
-            "dual_feasibility_tolerance": 1e-10,
-        },
+    allocation_result = optimize_allocation(
+        supplies=supplies,
+        demands=demands,
+        costs=costs,
+        haircuts=haircuts,
+        eligibility=eligibility,
     )
-
-    if solution.status == 2:
-        return _infeasible("Available eligible collateral cannot satisfy all requirements")
-    if not solution.success:
+    if allocation_result.status == "INFEASIBLE":
+        return _infeasible(allocation_result.message)
+    if not allocation_result.success:
         return {
             "status": "ERROR",
             "total_cost": None,
             "allocations": [],
             "requirement_coverage": [],
-            "message": solution.message,
+            "message": allocation_result.message,
         }
 
+    raw_quantities = [
+        allocation_result.allocations[asset_ids[asset_index]][
+            requirement_ids[requirement_index]
+        ]
+        / assets[asset_index]["market_value"]
+        for asset_index, requirement_index in pairs
+    ]
     emitted_quantities = _clip_solution_to_availability(
-        solution.x, pairs, assets
+        raw_quantities, pairs, assets
     )
     allocations: list[dict[str, Any]] = []
     contributions_by_requirement: list[list[float]] = [
