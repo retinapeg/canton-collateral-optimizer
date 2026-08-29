@@ -6,9 +6,13 @@ source "$ROOT_DIR/scripts/demo_common.sh"
 
 demo_on_exit() {
   local exit_status="$?"
+  local cleanup_status="0"
   trap - EXIT
-  demo_cleanup_canton || true
+  demo_cleanup_canton || cleanup_status="$?"
   demo_release_lock || true
+  if [[ "$exit_status" -eq 0 && "$cleanup_status" -ne 0 ]]; then
+    exit_status="$cleanup_status"
+  fi
   if [[ "$exit_status" -ne 0 ]]; then
     printf '\nDEMO FAIL\n'
     printf 'Logs: %s\n' "$DEMO_RUN_DIR"
@@ -29,62 +33,52 @@ if ! "$DEMO_ROOT/setup_demo.sh" --quiet; then
   demo_fail "Environment setup failed. Run ./setup_demo.sh for the detailed check."
   exit 1
 fi
+demo_find_system_python
 demo_configure_toolchain
 
 printf '==================================================\n'
 printf 'CANTON COLLATERAL OPTIMIZER DEMO\n'
 printf '==================================================\n\n'
 
-printf '[1/5] Environment\n'
+printf 'BOOTSTRAP\n'
 printf '✓ Python %s (.venv)\n' "$($DEMO_PYTHON --version 2>&1 | awk '{print $2}')"
 printf '✓ DPM (collateral SDK %s; wallet SDK %s)\n' \
   "$(demo_selected_sdk "$DEMO_COLLATERAL_DIR")" \
   "$(demo_selected_sdk "$DEMO_WALLET_DIR")"
-printf '✓ Canton %s available\n\n' "$(demo_canton_version "$DEMO_WALLET_DIR")"
+printf '✓ Canton %s available\n\n' "$(demo_canton_version "$DEMO_COLLATERAL_DIR")"
 
-printf '[2/5] Global optimisation\n\n'
-if ! "$DEMO_PYTHON" -B -m optimizer >"$DEMO_RUN_DIR/optimizer.log" 2>&1; then
-  cat "$DEMO_RUN_DIR/optimizer.log" >&2
-  demo_fail "The global optimizer command failed."
-  exit 1
-fi
-if ! grep -Fx 'OPTIMIZER PASS' "$DEMO_RUN_DIR/optimizer.log" >/dev/null; then
-  cat "$DEMO_RUN_DIR/optimizer.log" >&2
-  demo_fail "The optimizer did not emit its required OPTIMIZER PASS marker."
-  exit 1
-fi
-awk '
-  /Greedy\/local example cost:/ ||
-  /Global allocation:/ ||
-  /^Asset[0-9]+ -> Institution/ ||
-  /Global optimum cost:/ ||
-  /Savings vs local allocation:/ ||
-  /^OPTIMIZER PASS$/ { print }
-' "$DEMO_RUN_DIR/optimizer.log"
-printf '\n'
-
-printf '[3/5] Canton / Daml contracts\n'
-demo_start_or_reuse_canton
-if [[ "$DEMO_CANTON_MODE" == "reused" ]]; then
-  printf '✓ Reusing healthy Canton at %s\n' "$DEMO_LEDGER_URL"
-else
-  printf '✓ Canton started and ready at %s\n' "$DEMO_LEDGER_URL"
-fi
+printf 'FRESH CANTON LEDGER\n'
+demo_start_fresh_canton
+printf '✓ Owned sandbox ready at %s\n' "$DEMO_LEDGER_URL"
+printf '✓ Dedicated ports: %s-%s and %s\n' \
+  "$DEMO_LEDGER_GRPC_PORT" "$DEMO_MEDIATOR_ADMIN_PORT" "$DEMO_LEDGER_HTTP_PORT"
 demo_upload_dar "collateral" "$DEMO_COLLATERAL_DAR"
 demo_upload_dar "wallet" "$DEMO_WALLET_DAR"
-printf '✓ Daml builds current\n'
 printf '✓ Collateral and wallet packages loaded\n\n'
 
-printf '[4/5] Institutional allocation\n\n'
+# This bridge is the only optimiser invocation in the launcher. It prints the
+# optimiser result, deterministic ledger mapping, contract receipts, ledger
+# query, reconciliation, and authorization proof as one coherent [1]-[6] flow.
 if ! "$DEMO_PYTHON" -B -m backend.allocation_demo \
   --base-url "$DEMO_LEDGER_URL" \
   2>&1 | tee "$DEMO_RUN_DIR/allocation-demo.log"; then
   demo_fail "The optimizer-to-ledger institutional allocation failed."
   exit 1
 fi
-printf '\n✓ Institutional allocation workflow verified on Canton\n\n'
 
-printf '[5/5] Spend-limited wallet\n\n'
+for required_evidence in \
+  '✓ OPTIMIZER PASS' \
+  '✓ DAML SMART CONTRACTS COMMITTED TO CANTON' \
+  '✓ OPTIMIZER-TO-LEDGER END-TO-END PASS' \
+  '✓ recipient authority enforced'
+do
+  if ! grep -F "$required_evidence" "$DEMO_RUN_DIR/allocation-demo.log" >/dev/null; then
+    demo_fail "Institutional allocation evidence is incomplete: $required_evidence"
+    exit 1
+  fi
+done
+
+printf '\nSPEND-LIMITED WALLET\n\n'
 if ! env \
   -u C8_BASE \
   -u C8_IDP \
@@ -125,5 +119,5 @@ printf '✓ revocation enforced under load and afterwards\n'
 printf '✓ audit reconciles\n'
 printf '✓ statement written to agent_wallet/out/statement.html\n\n'
 
-printf 'DEMO PASS\n'
+printf 'FULL DEMO PASS\n'
 printf '==================================================\n'

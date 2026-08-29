@@ -45,7 +45,7 @@ fi
 
 COLLATERAL_SDK="$(demo_selected_sdk "$DEMO_COLLATERAL_DIR")"
 WALLET_SDK="$(demo_selected_sdk "$DEMO_WALLET_DIR")"
-CANTON_VERSION="$(demo_canton_version "$DEMO_WALLET_DIR")"
+CANTON_VERSION="$(demo_canton_version "$DEMO_COLLATERAL_DIR")"
 if [[ -z "$COLLATERAL_SDK" || -z "$WALLET_SDK" || -z "$CANTON_VERSION" ]]; then
   demo_fail "DPM is present, but its package SDK/Canton components could not be resolved."
   exit 1

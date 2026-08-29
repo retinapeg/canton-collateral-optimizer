@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Shared, source-only helpers for the root demo commands. Keep every path
+# Shared, source-only helpers for the root demo commands. Every path is
 # anchored to this checkout so callers do not need an activated environment or
 # a particular working directory.
 
@@ -17,33 +17,28 @@ DEMO_COLLATERAL_DAR="$DEMO_COLLATERAL_DIR/.daml/dist/collateral-optimizer-0.0.1.
 DEMO_WALLET_DIR="$DEMO_ROOT/agent_wallet"
 DEMO_WALLET_DAR="$DEMO_WALLET_DIR/.daml/dist/agent-wallet-0.0.1.dar"
 
+# The root demo always owns a brand-new sandbox on these dedicated ports. In
+# particular, it never probes, reuses, signals, or stops a service on 7575.
 DEMO_LEDGER_HOST="127.0.0.1"
-DEMO_LEDGER_HTTP_PORT="7575"
-DEMO_LEDGER_GRPC_PORT="6865"
+DEMO_LEDGER_GRPC_PORT="16865"
+DEMO_LEDGER_ADMIN_PORT="16866"
+DEMO_SEQUENCER_PUBLIC_PORT="16867"
+DEMO_SEQUENCER_ADMIN_PORT="16868"
+DEMO_MEDIATOR_ADMIN_PORT="16869"
+DEMO_LEDGER_HTTP_PORT="17575"
 DEMO_LEDGER_URL="http://$DEMO_LEDGER_HOST:$DEMO_LEDGER_HTTP_PORT"
-
-# The optimizer-to-ledger bridge deliberately requires a fresh ledger. It gets
-# a private, non-conflicting Canton topology so an existing wallet sandbox on
-# 7575 can be reused without being killed or polluted.
-DEMO_COLLATERAL_HTTP_PORT="7675"
-DEMO_COLLATERAL_GRPC_PORT="7865"
-DEMO_COLLATERAL_ADMIN_PORT="7866"
-DEMO_COLLATERAL_SEQUENCER_PORT="7867"
-DEMO_COLLATERAL_SEQUENCER_ADMIN_PORT="7868"
-DEMO_COLLATERAL_MEDIATOR_ADMIN_PORT="7869"
-DEMO_COLLATERAL_LEDGER_URL="http://$DEMO_LEDGER_HOST:$DEMO_COLLATERAL_HTTP_PORT"
 
 DEMO_DPM_BIN="${DEMO_DPM_BIN:-}"
 DEMO_SYSTEM_PYTHON=""
 DEMO_CURL_BIN=""
 DEMO_JAVA_HOME=""
 DEMO_CANTON_PID=""
-DEMO_CANTON_CHILD_PID=""
+DEMO_CANTON_PGID=""
 DEMO_CANTON_STARTED="0"
-DEMO_CANTON_MODE=""
-DEMO_COLLATERAL_CANTON_PID=""
-DEMO_COLLATERAL_CANTON_CHILD_PID=""
-DEMO_COLLATERAL_CANTON_STARTED="0"
+DEMO_CANTON_GROUP_READY="0"
+DEMO_CANTON_PID_FILE="$DEMO_RUN_DIR/canton.pid"
+DEMO_CANTON_GROUP_FILE="$DEMO_RUN_DIR/canton.process-group"
+DEMO_CANTON_PORT_FILE="$DEMO_RUN_DIR/canton-ports.json"
 DEMO_LOCK_HELD="0"
 
 demo_fail() {
@@ -186,17 +181,13 @@ demo_build_package() {
 }
 
 demo_ledger_ready() {
-  demo_url_ready "$DEMO_LEDGER_URL"
-}
-
-demo_url_ready() {
-  local ledger_url="$1"
+  [[ -s "$DEMO_CANTON_PORT_FILE" ]] &&
   "$DEMO_CURL_BIN" --fail --silent --show-error \
     --connect-timeout 1 --max-time 3 \
-    "$ledger_url/livez" >/dev/null 2>&1 &&
+    "$DEMO_LEDGER_URL/livez" >/dev/null 2>&1 &&
   "$DEMO_CURL_BIN" --fail --silent --show-error \
     --connect-timeout 1 --max-time 3 \
-    "$ledger_url/v2/state/ledger-end" >/dev/null 2>&1
+    "$DEMO_LEDGER_URL/v2/state/ledger-end" >/dev/null 2>&1
 }
 
 demo_port_has_listener() {
@@ -206,8 +197,63 @@ demo_port_has_listener() {
   elif command -v nc >/dev/null 2>&1; then
     nc -z "$DEMO_LEDGER_HOST" "$port_number" >/dev/null 2>&1
   else
+    demo_fail "Neither lsof nor nc is available for the required port safety check."
+  fi
+}
+
+demo_require_port_probe() {
+  if ! command -v lsof >/dev/null 2>&1 && ! command -v nc >/dev/null 2>&1; then
+    demo_fail "Neither lsof nor nc is available for the required port safety check."
     return 1
   fi
+}
+
+demo_owned_ports_bound() {
+  local owned_port=""
+  local owned_ports=(
+    "$DEMO_LEDGER_GRPC_PORT"
+    "$DEMO_LEDGER_ADMIN_PORT"
+    "$DEMO_SEQUENCER_PUBLIC_PORT"
+    "$DEMO_SEQUENCER_ADMIN_PORT"
+    "$DEMO_MEDIATOR_ADMIN_PORT"
+    "$DEMO_LEDGER_HTTP_PORT"
+  )
+  for owned_port in "${owned_ports[@]}"; do
+    if demo_port_has_listener "$owned_port"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+demo_process_group_alive() {
+  local process_group="$1"
+  if [[ ! "$process_group" =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+  ps -axo pgid=,stat= | awk -v group="$process_group" '
+    $1 == group && $2 !~ /^Z/ { found = 1 }
+    END { exit(found ? 0 : 1) }
+  '
+}
+
+demo_wait_for_group_marker() {
+  local attempt="0"
+  local marker_pid=""
+  while (( attempt < 100 )); do
+    marker_pid="$(sed -n '1p' "$DEMO_CANTON_GROUP_FILE" 2>/dev/null || true)"
+    if [[ "$marker_pid" == "$DEMO_CANTON_PID" ]]; then
+      DEMO_CANTON_PGID="$marker_pid"
+      DEMO_CANTON_GROUP_READY="1"
+      return 0
+    fi
+    if ! kill -0 "$DEMO_CANTON_PID" 2>/dev/null; then
+      return 1
+    fi
+    sleep 0.05
+    attempt=$((attempt + 1))
+  done
+  return 1
 }
 
 demo_wait_for_ledger() {
@@ -225,60 +271,83 @@ demo_wait_for_ledger() {
   return 1
 }
 
-demo_wait_for_collateral_ledger() {
-  local attempt="0"
-  while (( attempt < 120 )); do
-    if demo_url_ready "$DEMO_COLLATERAL_LEDGER_URL"; then
-      return 0
-    fi
-    if [[ -n "$DEMO_COLLATERAL_CANTON_PID" ]] &&
-       ! kill -0 "$DEMO_COLLATERAL_CANTON_PID" 2>/dev/null; then
-      return 1
-    fi
-    sleep 0.5
-    attempt=$((attempt + 1))
-  done
-  return 1
-}
-
-demo_capture_canton_child() {
-  if [[ -n "$DEMO_CANTON_PID" ]] && command -v pgrep >/dev/null 2>&1; then
-    DEMO_CANTON_CHILD_PID="$(pgrep -P "$DEMO_CANTON_PID" | head -n 1 || true)"
-  fi
-}
-
-demo_start_or_reuse_canton() {
+demo_start_fresh_canton() {
   local occupied_port=""
+  local marker_pgid=""
+  local actual_pgid=""
+  local required_ports=(
+    "$DEMO_LEDGER_GRPC_PORT"
+    "$DEMO_LEDGER_ADMIN_PORT"
+    "$DEMO_SEQUENCER_PUBLIC_PORT"
+    "$DEMO_SEQUENCER_ADMIN_PORT"
+    "$DEMO_MEDIATOR_ADMIN_PORT"
+    "$DEMO_LEDGER_HTTP_PORT"
+  )
+
   mkdir -p "$DEMO_RUN_DIR"
-
-  if demo_ledger_ready; then
-    DEMO_CANTON_MODE="reused"
-    return 0
+  if ! demo_require_port_probe; then
+    return 1
   fi
-
-  for occupied_port in 6865 6866 6867 6868 6869 7575; do
+  for occupied_port in "${required_ports[@]}"; do
     if demo_port_has_listener "$occupied_port"; then
-      demo_fail "Port $occupied_port is occupied, but Canton at $DEMO_LEDGER_URL is not healthy. No process was stopped."
+      demo_fail "Fresh Canton needs port $occupied_port, but it is already occupied. No process was stopped."
       return 1
     fi
   done
 
+  rm -f \
+    "$DEMO_CANTON_PID_FILE" \
+    "$DEMO_CANTON_GROUP_FILE" \
+    "$DEMO_CANTON_PORT_FILE"
   : >"$DEMO_RUN_DIR/canton.stdout.log"
   (
-    cd "$DEMO_WALLET_DIR"
-    exec "$DEMO_DPM_BIN" sandbox \
+    cd "$DEMO_COLLATERAL_DIR"
+    exec "$DEMO_SYSTEM_PYTHON" -c '
+import os
+import sys
+
+marker_file = sys.argv[1]
+executable = sys.argv[2]
+arguments = sys.argv[2:]
+
+os.setsid()
+with open(marker_file, "w", encoding="utf-8") as marker:
+    marker.write(f"{os.getpid()}\n")
+    marker.flush()
+    os.fsync(marker.fileno())
+os.execv(executable, arguments)
+' "$DEMO_CANTON_GROUP_FILE" "$DEMO_DPM_BIN" sandbox \
       --ledger-api-port "$DEMO_LEDGER_GRPC_PORT" \
+      --admin-api-port "$DEMO_LEDGER_ADMIN_PORT" \
+      --sequencer-public-port "$DEMO_SEQUENCER_PUBLIC_PORT" \
+      --sequencer-admin-port "$DEMO_SEQUENCER_ADMIN_PORT" \
+      --mediator-admin-port "$DEMO_MEDIATOR_ADMIN_PORT" \
       --json-api-port "$DEMO_LEDGER_HTTP_PORT" \
-      --canton-port-file "$DEMO_RUN_DIR/canton-ports.json" \
+      --canton-port-file "$DEMO_CANTON_PORT_FILE" \
       --log-file-name "$DEMO_RUN_DIR/canton.log" \
       --log-file-appender flat \
-      --log-truncate \
-      --dar "$DEMO_WALLET_DAR"
+      --log-truncate
   ) >>"$DEMO_RUN_DIR/canton.stdout.log" 2>&1 &
   DEMO_CANTON_PID="$!"
+  DEMO_CANTON_PGID="$DEMO_CANTON_PID"
   DEMO_CANTON_STARTED="1"
-  DEMO_CANTON_MODE="started"
-  printf '%s\n' "$DEMO_CANTON_PID" >"$DEMO_RUN_DIR/canton.pid"
+  printf '%s\n' "$DEMO_CANTON_PID" >"$DEMO_CANTON_PID_FILE"
+
+  if ! demo_wait_for_group_marker; then
+    printf '\nCanton process-group wrapper failed. Last log lines:\n' >&2
+    tail -n 60 "$DEMO_RUN_DIR/canton.stdout.log" >&2 || true
+    demo_cleanup_canton
+    demo_fail "Canton could not enter its owned process group."
+    return 1
+  fi
+
+  marker_pgid="$(sed -n '1p' "$DEMO_CANTON_GROUP_FILE" 2>/dev/null || true)"
+  actual_pgid="$(ps -p "$DEMO_CANTON_PID" -o pgid= 2>/dev/null | tr -d '[:space:]' || true)"
+  if [[ "$marker_pgid" != "$DEMO_CANTON_PID" || "$actual_pgid" != "$DEMO_CANTON_PID" ]]; then
+    demo_cleanup_canton
+    demo_fail "Canton process-group ownership could not be verified."
+    return 1
+  fi
 
   if ! demo_wait_for_ledger; then
     printf '\nCanton did not become ready. Last log lines:\n' >&2
@@ -287,73 +356,56 @@ demo_start_or_reuse_canton() {
     demo_fail "Canton startup failed. Full log: $DEMO_RUN_DIR/canton.stdout.log"
     return 1
   fi
-  demo_capture_canton_child
-}
-
-demo_start_fresh_collateral_canton() {
-  local occupied_port=""
-  local collateral_ports=""
-  mkdir -p "$DEMO_RUN_DIR"
-
-  collateral_ports="${DEMO_COLLATERAL_GRPC_PORT} ${DEMO_COLLATERAL_ADMIN_PORT} ${DEMO_COLLATERAL_SEQUENCER_PORT} ${DEMO_COLLATERAL_SEQUENCER_ADMIN_PORT} ${DEMO_COLLATERAL_MEDIATOR_ADMIN_PORT} ${DEMO_COLLATERAL_HTTP_PORT}"
-  for occupied_port in $collateral_ports; do
-    if demo_port_has_listener "$occupied_port"; then
-      demo_fail "Fresh collateral Canton needs port $occupied_port, but it is already occupied. No process was stopped."
-      return 1
-    fi
-  done
-
-  : >"$DEMO_RUN_DIR/collateral-canton.stdout.log"
-  (
-    cd "$DEMO_COLLATERAL_DIR"
-    exec "$DEMO_DPM_BIN" sandbox \
-      --ledger-api-port "$DEMO_COLLATERAL_GRPC_PORT" \
-      --admin-api-port "$DEMO_COLLATERAL_ADMIN_PORT" \
-      --sequencer-public-port "$DEMO_COLLATERAL_SEQUENCER_PORT" \
-      --sequencer-admin-port "$DEMO_COLLATERAL_SEQUENCER_ADMIN_PORT" \
-      --mediator-admin-port "$DEMO_COLLATERAL_MEDIATOR_ADMIN_PORT" \
-      --json-api-port "$DEMO_COLLATERAL_HTTP_PORT" \
-      --canton-port-file "$DEMO_RUN_DIR/collateral-canton-ports.json" \
-      --log-file-name "$DEMO_RUN_DIR/collateral-canton.log" \
-      --log-file-appender flat \
-      --log-truncate \
-      --dar "$DEMO_COLLATERAL_DAR"
-  ) >>"$DEMO_RUN_DIR/collateral-canton.stdout.log" 2>&1 &
-  DEMO_COLLATERAL_CANTON_PID="$!"
-  DEMO_COLLATERAL_CANTON_STARTED="1"
-  printf '%s\n' "$DEMO_COLLATERAL_CANTON_PID" >"$DEMO_RUN_DIR/collateral-canton.pid"
-
-  if ! demo_wait_for_collateral_ledger; then
-    printf '\nFresh collateral Canton did not become ready. Last log lines:\n' >&2
-    tail -n 60 "$DEMO_RUN_DIR/collateral-canton.stdout.log" >&2 || true
-    demo_cleanup_collateral_canton
-    demo_fail "Collateral Canton startup failed. Full log: $DEMO_RUN_DIR/collateral-canton.stdout.log"
-    return 1
-  fi
-  if command -v pgrep >/dev/null 2>&1; then
-    DEMO_COLLATERAL_CANTON_CHILD_PID="$(pgrep -P "$DEMO_COLLATERAL_CANTON_PID" | head -n 1 || true)"
-  fi
 }
 
 demo_upload_dar() {
   local label="$1"
   local dar_file="$2"
   local upload_log="$DEMO_RUN_DIR/${label}.upload.log"
+  local attempt="0"
+  local curl_status="0"
+  local http_status=""
 
   if [[ ! -s "$dar_file" ]]; then
     demo_fail "Cannot load missing $label DAR: $dar_file"
     return 1
   fi
-  if ! "$DEMO_CURL_BIN" --fail --silent --show-error \
-    --max-time 120 \
-    --request POST \
-    --header 'Content-Type: application/octet-stream' \
-    --data-binary "@$dar_file" \
-    "$DEMO_LEDGER_URL/v2/packages" >"$upload_log" 2>&1; then
+
+  # The HTTP endpoint can answer before the in-memory sandbox has connected
+  # its synchronizer. Retry only that explicit Canton startup race; all other
+  # upload failures remain immediate and visible.
+  while (( attempt < 120 )); do
+    curl_status="0"
+    if http_status="$("$DEMO_CURL_BIN" --silent --show-error \
+      --max-time 120 \
+      --request POST \
+      --header 'Content-Type: application/octet-stream' \
+      --data-binary "@$dar_file" \
+      --output "$upload_log" \
+      --write-out '%{http_code}' \
+      "$DEMO_LEDGER_URL/v2/packages")"; then
+      curl_status="0"
+    else
+      curl_status="$?"
+    fi
+
+    if [[ "$curl_status" == "0" && "$http_status" == 2* ]]; then
+      return 0
+    fi
+    if [[ "$http_status" == "400" ]] &&
+       grep -F 'PACKAGE_SERVICE_CANNOT_AUTODETECT_SYNCHRONIZER' "$upload_log" >/dev/null 2>&1; then
+      sleep 0.5
+      attempt=$((attempt + 1))
+      continue
+    fi
+
     cat "$upload_log" >&2 || true
-    demo_fail "Canton rejected the $label DAR. See $upload_log"
+    demo_fail "Canton rejected the $label DAR (HTTP $http_status, curl $curl_status). See $upload_log"
     return 1
-  fi
+  done
+
+  cat "$upload_log" >&2 || true
+  demo_fail "Canton synchronizer was not ready to load the $label DAR. See $upload_log"
 }
 
 demo_stop_exact_pid() {
@@ -374,55 +426,76 @@ demo_stop_exact_pid() {
 }
 
 demo_cleanup_canton() {
-  local child_command=""
+  local attempt="0"
+  local cleanup_failed="0"
+  local current_pgid=""
+  local recorded_pid=""
+  local marker_pgid=""
+
   if [[ "$DEMO_CANTON_STARTED" != "1" ]]; then
     return 0
   fi
 
-  demo_stop_exact_pid "$DEMO_CANTON_PID"
+  recorded_pid="$(sed -n '1p' "$DEMO_CANTON_PID_FILE" 2>/dev/null || true)"
+  marker_pgid="$(sed -n '1p' "$DEMO_CANTON_GROUP_FILE" 2>/dev/null || true)"
+  current_pgid="$(ps -p "$$" -o pgid= 2>/dev/null | tr -d '[:space:]' || true)"
+
+  if [[ "$DEMO_CANTON_GROUP_READY" == "1" &&
+        "$recorded_pid" == "$DEMO_CANTON_PID" &&
+        "$marker_pgid" == "$DEMO_CANTON_PGID" &&
+        "$DEMO_CANTON_PGID" =~ ^[0-9]+$ &&
+        "$DEMO_CANTON_PGID" != "$current_pgid" ]]; then
+    kill -TERM -- "-$DEMO_CANTON_PGID" 2>/dev/null || true
+    while (( attempt < 40 )); do
+      if ! demo_process_group_alive "$DEMO_CANTON_PGID"; then
+        break
+      fi
+      sleep 0.25
+      attempt=$((attempt + 1))
+    done
+    if demo_process_group_alive "$DEMO_CANTON_PGID"; then
+      kill -KILL -- "-$DEMO_CANTON_PGID" 2>/dev/null || true
+    fi
+  else
+    # Before the setsid marker exists, the wrapper has not spawned Java. Only
+    # that exact wrapper PID is safe to stop.
+    demo_stop_exact_pid "$DEMO_CANTON_PID"
+  fi
+
   if [[ -n "$DEMO_CANTON_PID" ]]; then
     wait "$DEMO_CANTON_PID" 2>/dev/null || true
   fi
 
-  # DPM normally forwards TERM to its Java child. If it did not, stop only the
-  # exact child captured from the DPM process, after confirming it is Canton.
-  if [[ -n "$DEMO_CANTON_CHILD_PID" ]] && kill -0 "$DEMO_CANTON_CHILD_PID" 2>/dev/null; then
-    child_command="$(ps -p "$DEMO_CANTON_CHILD_PID" -o command= 2>/dev/null || true)"
-    if [[ "$child_command" == *canton* ]]; then
-      demo_stop_exact_pid "$DEMO_CANTON_CHILD_PID"
+  # Do not return control to an immediate second run until every descendant is
+  # gone and every port owned by this sandbox is unbound.
+  attempt="0"
+  while (( attempt < 40 )); do
+    if ! demo_process_group_alive "$DEMO_CANTON_PGID" && ! demo_owned_ports_bound; then
+      break
     fi
+    sleep 0.25
+    attempt=$((attempt + 1))
+  done
+  if demo_process_group_alive "$DEMO_CANTON_PGID"; then
+    demo_fail "Owned Canton process group $DEMO_CANTON_PGID did not exit."
+    cleanup_failed="1"
+  fi
+  if demo_owned_ports_bound; then
+    demo_fail "One or more owned Canton ports remained bound after cleanup."
+    cleanup_failed="1"
   fi
 
-  if [[ -f "$DEMO_RUN_DIR/canton.pid" ]] &&
-     [[ "$(sed -n '1p' "$DEMO_RUN_DIR/canton.pid")" == "$DEMO_CANTON_PID" ]]; then
-    rm -f "$DEMO_RUN_DIR/canton.pid"
+  if [[ "$cleanup_failed" == "0" ]]; then
+    if [[ "$(sed -n '1p' "$DEMO_CANTON_PID_FILE" 2>/dev/null || true)" == "$DEMO_CANTON_PID" ]]; then
+      rm -f "$DEMO_CANTON_PID_FILE"
+    fi
+    if [[ "$(sed -n '1p' "$DEMO_CANTON_GROUP_FILE" 2>/dev/null || true)" == "$DEMO_CANTON_PGID" ]]; then
+      rm -f "$DEMO_CANTON_GROUP_FILE"
+    fi
   fi
   DEMO_CANTON_STARTED="0"
-}
-
-demo_cleanup_collateral_canton() {
-  local child_command=""
-  if [[ "$DEMO_COLLATERAL_CANTON_STARTED" != "1" ]]; then
-    return 0
-  fi
-
-  demo_stop_exact_pid "$DEMO_COLLATERAL_CANTON_PID"
-  if [[ -n "$DEMO_COLLATERAL_CANTON_PID" ]]; then
-    wait "$DEMO_COLLATERAL_CANTON_PID" 2>/dev/null || true
-  fi
-  if [[ -n "$DEMO_COLLATERAL_CANTON_CHILD_PID" ]] &&
-     kill -0 "$DEMO_COLLATERAL_CANTON_CHILD_PID" 2>/dev/null; then
-    child_command="$(ps -p "$DEMO_COLLATERAL_CANTON_CHILD_PID" -o command= 2>/dev/null || true)"
-    if [[ "$child_command" == *canton* ]]; then
-      demo_stop_exact_pid "$DEMO_COLLATERAL_CANTON_CHILD_PID"
-    fi
-  fi
-
-  if [[ -f "$DEMO_RUN_DIR/collateral-canton.pid" ]] &&
-     [[ "$(sed -n '1p' "$DEMO_RUN_DIR/collateral-canton.pid")" == "$DEMO_COLLATERAL_CANTON_PID" ]]; then
-    rm -f "$DEMO_RUN_DIR/collateral-canton.pid"
-  fi
-  DEMO_COLLATERAL_CANTON_STARTED="0"
+  DEMO_CANTON_GROUP_READY="0"
+  return "$cleanup_failed"
 }
 
 demo_acquire_lock() {

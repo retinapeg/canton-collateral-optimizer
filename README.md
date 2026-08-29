@@ -2,6 +2,34 @@
 
 Privacy-preserving collateral optimisation across fragmented financial systems using Python for constrained optimisation and Daml/Canton for permissioned multi-party state, approvals and execution.
 
+## Hackathon demo
+
+From the repository root, the normal complete demo entrypoint is:
+
+```bash
+./demo.sh
+```
+
+No virtual-environment activation, `PATH` export, package-directory change, or
+separate Canton terminal is required. The launcher reuses the persistent local
+`.venv`, installs Python dependencies only when the manifest or environment has
+changed, discovers DPM, builds both Daml packages, starts a fresh owned Canton
+sandbox on dedicated ports, runs the optimiser-to-ledger workflow and wallet
+proof, and then waits for its entire sandbox process group to exit.
+
+An unrelated Canton instance on port 7575 is never reused or stopped. Local
+runtime logs are written under the gitignored `.run/` directory.
+
+The optional root-level preparation and verification commands are:
+
+```bash
+./setup_demo.sh
+./test_all.sh
+```
+
+The detailed commands later in this README remain useful for component-level
+development, but are not required for the complete hackathon demo.
+
 ## Collaboration
 
 This repository is private. Every collaborator must be explicitly invited to
