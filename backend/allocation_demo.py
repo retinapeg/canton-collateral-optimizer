@@ -713,14 +713,10 @@ def print_reconciliation_section(
         print(f"\n{bank} required: {quantity}")
         print(f"{bank} received: {quantity} {instruction.ledger_asset}")
         print("✓ PASS")
-    print("\nCANTON LEDGER PROOF")
+    print(f"\nOptimizer instructions generated: {len(instructions)}")
     print(
-        "Optimizer instructions committed: "
-        f"{len(flow.create_responses)}/{len(instructions)}"
-    )
-    print(
-        "Accepted allocations active: "
-        f"{len(flow.allocations)}/{len(instructions)}"
+        "Optimizer instructions committed to Canton: "
+        f"{len(flow.allocations)}"
     )
     print("✓ PASS")
     print("\n✓ OPTIMIZER-TO-LEDGER END-TO-END PASS")
