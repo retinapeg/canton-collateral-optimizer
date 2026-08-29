@@ -39,6 +39,22 @@ data MandateSnapshot = MandateSnapshot
   deriving (Eq, Show)
 
 
+data ProposalSnapshot = ProposalSnapshot
+  with
+    cid : ContractId MandateProposal
+    owner : Party
+    agent : Party
+    mandateId : Text
+    cap : Decimal
+    expiresAt : Time
+    allowedMerchants : [Party]
+    assetIssuer : Party
+    assetId : Text
+    assetAmount : Decimal
+    assetCid : ContractId DemoAsset
+  deriving (Eq, Show)
+
+
 data AssetSnapshot = AssetSnapshot
   with
     cid : ContractId DemoAsset
@@ -77,6 +93,7 @@ data AuditSnapshot = AuditSnapshot
 
 data LedgerSnapshot = LedgerSnapshot
   with
+    proposals : [ProposalSnapshot]
     mandates : [MandateSnapshot]
     assets : [AssetSnapshot]
     audits : [AuditSnapshot]
@@ -98,6 +115,21 @@ toMandateSnapshot (cid, mandate) = MandateSnapshot with
   initialAssetAmount = mandate.initialAssetAmount
   assetBalance = mandate.assetBalance
   assetCid = mandate.assetCid
+
+
+toProposalSnapshot : (ContractId MandateProposal, MandateProposal) -> ProposalSnapshot
+toProposalSnapshot (cid, proposal) = ProposalSnapshot with
+  cid
+  owner = proposal.owner
+  agent = proposal.agent
+  mandateId = proposal.mandateId
+  cap = proposal.cap
+  expiresAt = proposal.expiresAt
+  allowedMerchants = proposal.allowedMerchants
+  assetIssuer = proposal.assetIssuer
+  assetId = proposal.assetId
+  assetAmount = proposal.assetAmount
+  assetCid = proposal.assetCid
 
 
 toAssetSnapshot : (ContractId DemoAsset, DemoAsset) -> AssetSnapshot
@@ -194,10 +226,12 @@ charge actor mandateCid merchant amount memo =
 
 captureLedger : Parties -> Script LedgerSnapshot
 captureLedger parties = do
+  proposals <- query @MandateProposal parties.owner
   mandates <- query @Mandate parties.owner
   assets <- query @DemoAsset parties.issuer
   audits <- query @ChargeRecord parties.owner
   pure LedgerSnapshot with
+    proposals = map toProposalSnapshot proposals
     mandates = map toMandateSnapshot mandates
     assets = map toAssetSnapshot assets
     audits = map toAuditSnapshot audits
@@ -602,3 +636,63 @@ redTeamSettlementOwnerCustodyStaleBindingRollsBack = script do
   assert (holderBalance parties.merchantB after.assets == 100.0)
   assert (length after.audits == 0)
   assertUnchanged "owner custody stale binding" before after
+
+
+-- Regression for the validation asymmetry found at d0c01be: an empty internal
+-- asset identifier must fail at issuance and both permission boundaries. The
+-- valid reference asset and every other relevant ACS projection remain exact.
+redTeamSettlementEmptyAssetIdRejectedAtEveryBoundary : Script ()
+redTeamSettlementEmptyAssetIdRejectedAtEveryBoundary = script do
+  parties <- allocateParties ()
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+
+  empty <- captureLedger parties
+  submitMustFail parties.issuer do
+    createCmd DemoAsset with
+      issuer = parties.issuer
+      holder = parties.owner
+      viewer = parties.agent
+      assetId = ""
+      amount = 100.0
+  afterInvalidAsset <- captureLedger parties
+  assertUnchanged "empty asset id at issuance" empty afterInvalidAsset
+
+  validAssetCid <- issueAsset parties 100.0 "DEMO-GBP:RED-VALIDATION"
+  validAssetState <- captureLedger parties
+
+  submitMustFail parties.owner do
+    createCmd MandateProposal with
+      owner = parties.owner
+      agent = parties.agent
+      mandateId = "RED-EMPTY-ID-PROPOSAL"
+      cap = 100.0
+      expiresAt
+      allowedMerchants = [parties.merchantA]
+      assetIssuer = parties.issuer
+      assetId = ""
+      assetAmount = 100.0
+      assetCid = validAssetCid
+  afterInvalidProposal <- captureLedger parties
+  assertUnchanged "empty asset id at proposal" validAssetState afterInvalidProposal
+
+  submitMustFail (actAs [parties.owner, parties.agent]) do
+    createCmd Mandate with
+      owner = parties.owner
+      agent = parties.agent
+      mandateId = "RED-EMPTY-ID-MANDATE"
+      cap = 100.0
+      spent = 0.0
+      expiresAt
+      allowedMerchants = [parties.merchantA]
+      assetIssuer = parties.issuer
+      assetId = ""
+      initialAssetAmount = 100.0
+      assetBalance = 100.0
+      assetCid = Some validAssetCid
+  afterInvalidMandate <- captureLedger parties
+  assertUnchanged "empty asset id at mandate" validAssetState afterInvalidMandate
+
+  Some unchangedAsset <- queryContractId parties.owner validAssetCid
+  assert (unchangedAsset.assetId == "DEMO-GBP:RED-VALIDATION")
+  assert (unchangedAsset.amount == 100.0)
