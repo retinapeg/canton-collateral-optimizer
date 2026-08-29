@@ -174,7 +174,7 @@ def format_transaction_receipt(
         f"FROM: {source}",
         f"TO: {recipient}",
         f"ACTION: {action}",
-        f"UPDATE ID (TXID equivalent): {transaction['updateId']}",
+        f"Canton updateId: {transaction['updateId']}",
     ]
     command_id = transaction.get("commandId")
     if isinstance(command_id, str) and command_id:
@@ -409,6 +409,7 @@ def run_ledger_flow(
             arguments=payload,
             label=f"bank-a-propose-{instruction.reference}",
         )
+        create_transaction = transaction_from_submit_response(create_response)
         create_responses[instruction.reference] = create_response
         if instruction.recipient_hint == "BankB":
             emit(
@@ -429,6 +430,7 @@ def run_ledger_flow(
             proposal, instruction, source=source, recipient=recipient
         )
         emit("\n✓ DAML SMART CONTRACT CREATED")
+        emit(f"Canton updateId: {create_transaction['updateId']}")
         emit("  Template: AllocationProposal")
         emit(
             f"  {party_display(instruction.source_hint)} -> "
@@ -478,6 +480,7 @@ def run_ledger_flow(
                 f"{instruction.reference}"
             ),
         )
+        accept_transaction = transaction_from_submit_response(accept_response)
         accept_responses[instruction.reference] = accept_response
         if instruction.recipient_hint == "BankB":
             emit(
@@ -504,7 +507,8 @@ def run_ledger_flow(
             allocation, instruction, source=source, recipient=recipient
         )
         accepted_by_reference[instruction.reference] = allocation
-        emit("\n✓ DAML CHOICE EXERCISED")
+        emit("\n✓ DAML CHOICE EXERCISED: Accept")
+        emit(f"Canton updateId: {accept_transaction['updateId']}")
         emit("✓ Accepted allocation contract created")
 
     if not authorization_rejected:
@@ -709,10 +713,14 @@ def print_reconciliation_section(
         print(f"\n{bank} required: {quantity}")
         print(f"{bank} received: {quantity} {instruction.ledger_asset}")
         print("✓ PASS")
-    print(f"\nOptimizer instructions generated: {len(instructions)}")
+    print("\nCANTON LEDGER PROOF")
     print(
-        "Optimizer instructions committed to Canton: "
-        f"{len(flow.allocations)}"
+        "Optimizer instructions committed: "
+        f"{len(flow.create_responses)}/{len(instructions)}"
+    )
+    print(
+        "Accepted allocations active: "
+        f"{len(flow.allocations)}/{len(instructions)}"
     )
     print("✓ PASS")
     print("\n✓ OPTIMIZER-TO-LEDGER END-TO-END PASS")

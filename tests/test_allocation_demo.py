@@ -288,6 +288,15 @@ class AllocationLedgerFlowTests(unittest.TestCase):
             [contract.payload["allocationReference"] for contract in flow.allocations],
             ["optimizer-allocation-001", "optimizer-allocation-002"],
         )
+        self.assertEqual(
+            [message for message in messages if message.startswith("Canton updateId:")],
+            [
+                "Canton updateId: create-update-proposal-1",
+                "Canton updateId: accept-update-allocation-2",
+                "Canton updateId: create-update-proposal-3",
+                "Canton updateId: accept-update-allocation-4",
+            ],
+        )
         receipt_text = "\n".join(
             message
             for message in messages
@@ -300,11 +309,11 @@ class AllocationLedgerFlowTests(unittest.TestCase):
         self.assertEqual(receipt_text.count("TO: Bank B"), 2)
         self.assertNotIn("TO: Bank C", receipt_text)
         self.assertIn(
-            "UPDATE ID (TXID equivalent): create-update-proposal-1",
+            "Canton updateId: create-update-proposal-1",
             receipt_text,
         )
         self.assertIn(
-            "UPDATE ID (TXID equivalent): accept-update-allocation-2",
+            "Canton updateId: accept-update-allocation-2",
             receipt_text,
         )
         self.assertNotIn("create-update-proposal-3", receipt_text)
@@ -376,7 +385,7 @@ class TransactionReceiptTests(unittest.TestCase):
                     "FROM: Bank A",
                     "TO: Bank B",
                     "ACTION: #collateral-optimizer:CollateralAllocation:AllocationProposal",
-                    "UPDATE ID (TXID equivalent): actual-update-id-from-canton",
+                    "Canton updateId: actual-update-id-from-canton",
                     "COMMAND ID: actual-command-id-from-canton",
                     "LEDGER OFFSET: 42",
                     "CREATED CONTRACT ID: actual-created-contract-id",
@@ -409,7 +418,7 @@ class TransactionReceiptTests(unittest.TestCase):
             action="AllocationProposal.Accept",
         )
 
-        self.assertIn("UPDATE ID (TXID equivalent): tree-update-id", receipt)
+        self.assertIn("Canton updateId: tree-update-id", receipt)
         self.assertIn("CREATED CONTRACT ID: tree-created-contract-id", receipt)
         self.assertNotIn("COMMAND ID:", receipt)
         self.assertNotIn("LEDGER OFFSET:", receipt)
