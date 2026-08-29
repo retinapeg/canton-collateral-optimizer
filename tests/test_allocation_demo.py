@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from contextlib import redirect_stdout
 from dataclasses import replace
 from decimal import Decimal
+import io
 import unittest
 
 from backend.allocation_demo import (
@@ -9,6 +11,7 @@ from backend.allocation_demo import (
     build_ledger_instructions,
     created_contract_ids,
     format_transaction_receipt,
+    print_optimizer_section,
     reconcile,
     run_ledger_flow,
     run_optimizer,
@@ -204,6 +207,27 @@ class AllocationMappingTests(unittest.TestCase):
         self.assertEqual(
             [row.quantity_wire for row in instructions],
             ["30.0000000000", "20.0000000000"],
+        )
+
+    def test_optimizer_output_preserves_required_objective_evidence(self) -> None:
+        result = run_optimizer()
+        instructions = build_ledger_instructions(result)
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            print_optimizer_section(result, instructions)
+
+        evidence = output.getvalue()
+        self.assertIn("Local / greedy objective score: 101.0", evidence)
+        self.assertIn("Global optimum objective score: 3.1", evidence)
+        self.assertIn("Improvement: 97.9", evidence)
+        self.assertIn("Reduction: approximately 96.9%", evidence)
+        self.assertIn(
+            "The optimiser minimizes a normalized allocation cost derived from "
+            "the eligibility/cost matrix. Lower is better. In this illustrative "
+            "scenario the score falls from 101.0 to 3.1, a reduction of "
+            "approximately 96.9%.",
+            evidence,
         )
 
     def test_mapping_rejects_a_missing_optimizer_allocation(self) -> None:
