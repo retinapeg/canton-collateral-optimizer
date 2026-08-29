@@ -119,16 +119,16 @@ These steps have already been completed on the current machine. They are here
 so the demo is reproducible:
 
 ```bash
-brew install openjdk@17
-curl -fsSL https://get.digitalasset.com/install/install.sh | sh -s 3.5.7
+brew install openjdk@21
+curl -sSL https://get.daml.com/ -o get-daml.sh && sh get-daml.sh 3.4.10
 ```
 
 Create the project-local Python environment and install the tested dependencies:
 
 ```bash
+# We use the 'hack' virtual environment created in the parent directory
 cd canton-collateral-optimizer
-python3 -m venv .venv
-source .venv/bin/activate
+source ../hack/bin/activate
 python -m pip install -r requirements.txt
 ```
 
@@ -136,9 +136,9 @@ For each new terminal, activate the virtual environment and expose Java and DPM:
 
 ```bash
 cd canton-collateral-optimizer
-source .venv/bin/activate
-export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
-export PATH="$HOME/.dpm/bin:/opt/homebrew/opt/openjdk@17/bin:$PATH"
+source ../hack/bin/activate
+export JAVA_HOME=/opt/homebrew/opt/openjdk@21
+export PATH="$HOME/.daml/bin:$JAVA_HOME/bin:$PATH"
 ```
 
 Check the installation:
