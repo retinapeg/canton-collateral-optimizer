@@ -1,0 +1,265 @@
+module InstitutionalDemo where
+
+import DA.Optional (isNone)
+import Daml.Script
+import InstitutionalCollateral
+
+data InstitutionalParties = InstitutionalParties with
+  institutionK : Party
+  custodianA : Party
+  custodianB : Party
+  allocator : Party
+  marginBankL : Party
+  repoBankM : Party
+
+allocateInstitutionalParties : Script InstitutionalParties
+allocateInstitutionalParties = do
+  institutionK <- allocatePartyByHint (PartyIdHint "InstitutionK")
+  custodianA <- allocatePartyByHint (PartyIdHint "CustodianA")
+  custodianB <- allocatePartyByHint (PartyIdHint "CustodianB")
+  allocator <- allocatePartyByHint (PartyIdHint "GlobalAllocator")
+  marginBankL <- allocatePartyByHint (PartyIdHint "MarginBankL")
+  repoBankM <- allocatePartyByHint (PartyIdHint "RepoBankM")
+  pure InstitutionalParties with
+    institutionK; custodianA; custodianB; allocator; marginBankL; repoBankM
+
+globalMinimumAcrossDepots : Script ()
+globalMinimumAcrossDepots = script do
+  parties <- allocateInstitutionalParties
+
+  governmentPosition <- submitMulti
+      [parties.institutionK, parties.custodianA] [] do
+    createCmd DepotPosition with
+      institution = parties.institutionK
+      custodian = parties.custodianA
+      allocator = parties.allocator
+      positionId = "POSITION-A-GILT"
+      depotId = "DEPOT-A"
+      assetId = "GILT-2030"
+      assetClass = "GOVERNMENT_BOND"
+      marketValue = 100.0
+      availableQuantity = 1.0
+
+  corporatePosition <- submitMulti
+      [parties.institutionK, parties.custodianB] [] do
+    createCmd DepotPosition with
+      institution = parties.institutionK
+      custodian = parties.custodianB
+      allocator = parties.allocator
+      positionId = "POSITION-B-CORP"
+      depotId = "DEPOT-B"
+      assetId = "CORP-2029"
+      assetClass = "CORPORATE_BOND"
+      marketValue = 100.0
+      availableQuantity = 1.0
+
+  marginRequirement <- submitMulti
+      [parties.institutionK, parties.marginBankL] [] do
+    createCmd InstitutionalRequirement with
+      institution = parties.institutionK
+      beneficiary = parties.marginBankL
+      allocator = parties.allocator
+      requirementId = "MARGIN-L"
+      purpose = "Bilateral derivatives margin"
+      requiredEffectiveValue = 90.0
+      eligibilityTerms =
+        [ EligibilityTerm with
+            assetClass = "GOVERNMENT_BOND"; haircut = 0.0; unitCost = 0.8
+        , EligibilityTerm with
+            assetClass = "CORPORATE_BOND"; haircut = 0.1; unitCost = 0.2
+        ]
+
+  repoRequirement <- submitMulti
+      [parties.institutionK, parties.repoBankM] [] do
+    createCmd InstitutionalRequirement with
+      institution = parties.institutionK
+      beneficiary = parties.repoBankM
+      allocator = parties.allocator
+      requirementId = "REPO-M"
+      purpose = "Repo collateral"
+      requiredEffectiveValue = 90.0
+      eligibilityTerms =
+        [ EligibilityTerm with
+            assetClass = "GOVERNMENT_BOND"; haircut = 0.0; unitCost = 0.05
+        , EligibilityTerm with
+            assetClass = "CORPORATE_BOND"; haircut = 0.1; unitCost = 0.8
+        ]
+
+  -- Fragmentation is real: K and the allocator see both positions, while each
+  -- custodian sees only the position in its own depot.
+  custodianACannotSeeCorporateBefore <-
+    queryContractId parties.custodianA corporatePosition
+  custodianBCannotSeeGovernmentBefore <-
+    queryContractId parties.custodianB governmentPosition
+  marginBankCannotSeeGovernment <-
+    queryContractId parties.marginBankL governmentPosition
+  assert (isNone custodianACannotSeeCorporateBefore)
+  assert (isNone custodianBCannotSeeGovernmentBefore)
+  assert (isNone marginBankCannotSeeGovernment)
+
+  -- Local silo result: A sends government bonds to margin and B sends
+  -- corporates to repo.  Total cost = 0.72 + 0.80 = 1.52.
+  localA <- submit parties.allocator do
+    createCmd LocalOptimisationBenchmark with
+      institution = parties.institutionK
+      allocator = parties.allocator
+      benchmarkId = "LOCAL-DEPOT-A"
+      depotId = "DEPOT-A"
+      totalCost = 0.72
+  localB <- submit parties.allocator do
+    createCmd LocalOptimisationBenchmark with
+      institution = parties.institutionK
+      allocator = parties.allocator
+      benchmarkId = "LOCAL-DEPOT-B"
+      depotId = "DEPOT-B"
+      totalCost = 0.8
+
+  underCoveredPlan <- submit parties.allocator do
+    createCmd GlobalAllocationPlan with
+      planId = "UNDER-COVERED-PLAN"
+      institution = parties.institutionK
+      allocator = parties.allocator
+      requirementCids = [marginRequirement, repoRequirement]
+      benchmarkCids = [localA, localB]
+      lines =
+        [ AllocationLine with
+            positionCid = corporatePosition
+            requirementCid = marginRequirement
+            quantity = 1.0
+        , AllocationLine with
+            positionCid = governmentPosition
+            requirementCid = repoRequirement
+            quantity = 0.8
+        ]
+      claimedLocalCost = 1.52
+      claimedGlobalCost = 0.24
+  submitMustFail parties.institutionK do exerciseCmd underCoveredPlan Approve
+
+  wrongCostPlan <- submit parties.allocator do
+    createCmd GlobalAllocationPlan with
+      planId = "WRONG-COST-PLAN"
+      institution = parties.institutionK
+      allocator = parties.allocator
+      requirementCids = [marginRequirement, repoRequirement]
+      benchmarkCids = [localA, localB]
+      lines =
+        [ AllocationLine with
+            positionCid = corporatePosition
+            requirementCid = marginRequirement
+            quantity = 1.0
+        , AllocationLine with
+            positionCid = governmentPosition
+            requirementCid = repoRequirement
+            quantity = 0.9
+        ]
+      claimedLocalCost = 1.52
+      claimedGlobalCost = 0.244
+  submitMustFail parties.institutionK do exerciseCmd wrongCostPlan Approve
+
+  -- Global result swaps the destinations: B's corporate covers margin and
+  -- A's government bond covers repo.  Total cost = 0.20 + 0.045 = 0.245.
+  plan <- submit parties.allocator do
+    createCmd GlobalAllocationPlan with
+      planId = "GLOBAL-PLAN-001"
+      institution = parties.institutionK
+      allocator = parties.allocator
+      requirementCids = [marginRequirement, repoRequirement]
+      benchmarkCids = [localA, localB]
+      lines =
+        [ AllocationLine with
+            positionCid = corporatePosition
+            requirementCid = marginRequirement
+            quantity = 1.0
+        , AllocationLine with
+            positionCid = governmentPosition
+            requirementCid = repoRequirement
+            quantity = 0.9
+        ]
+      claimedLocalCost = 1.52
+      claimedGlobalCost = 0.245
+
+  -- Only K can approve.  Approval validates aggregate coverage and savings,
+  -- then reserves both depots atomically.
+  submitMustFail parties.allocator do exerciseCmd plan Approve
+  submitMustFail parties.custodianA do exerciseCmd plan Approve
+  approved <- submit parties.institutionK do exerciseCmd plan Approve
+
+  oldGovernment <- queryContractId parties.institutionK governmentPosition
+  oldCorporate <- queryContractId parties.institutionK corporatePosition
+  assert (isNone oldGovernment)
+  assert (isNone oldCorporate)
+
+  assertMsg "unexpected residual position shape"
+    (length approved.residualPositionCids == 2)
+  let [None, Some governmentResidual] = approved.residualPositionCids
+  Some residual <- queryContractId parties.institutionK governmentResidual
+  assert (residual.availableQuantity == 0.1)
+
+  assertMsg "unexpected instruction count"
+    (length approved.instructionCids == 2)
+  let [marginInstruction, repoInstruction] = approved.instructionCids
+
+  -- Privacy: each custodian and beneficiary sees just its own allocation edge.
+  custodianAInstructions <- query @CollateralExecutionInstruction parties.custodianA
+  custodianBInstructions <- query @CollateralExecutionInstruction parties.custodianB
+  marginInstructions <- query @CollateralExecutionInstruction parties.marginBankL
+  repoInstructions <- query @CollateralExecutionInstruction parties.repoBankM
+  assert (length custodianAInstructions == 1)
+  assert (length custodianBInstructions == 1)
+  assert (length marginInstructions == 1)
+  assert (length repoInstructions == 1)
+
+  custodianBCannotSeeResidual <-
+    queryContractId parties.custodianB governmentResidual
+  marginCannotSeeRepoInstruction <-
+    queryContractId parties.marginBankL repoInstruction
+  repoCannotSeeMarginInstruction <-
+    queryContractId parties.repoBankM marginInstruction
+  assert (isNone custodianBCannotSeeResidual)
+  assert (isNone marginCannotSeeRepoInstruction)
+  assert (isNone repoCannotSeeMarginInstruction)
+
+  -- The selected custodians execute settlement; an unrelated custodian cannot.
+  submitMustFail parties.custodianA do exerciseCmd marginInstruction Execute
+  marginPledge <- submit parties.custodianB do
+    exerciseCmd marginInstruction Execute
+  repoPledge <- submit parties.custodianA do
+    exerciseCmd repoInstruction Execute
+
+  Some marginState <- queryContractId parties.marginBankL marginPledge
+  Some repoState <- queryContractId parties.repoBankM repoPledge
+  assert (marginState.assetId == "CORP-2029")
+  assert (marginState.effectiveValue == 90.0)
+  assert (marginState.cost == 0.2)
+  assert (repoState.assetId == "GILT-2030")
+  assert (repoState.effectiveValue == 90.0)
+  assert (repoState.cost == 0.045)
+
+  marginCannotSeeRepoPledge <-
+    queryContractId parties.marginBankL repoPledge
+  repoCannotSeeMarginPledge <-
+    queryContractId parties.repoBankM marginPledge
+  assert (isNone marginCannotSeeRepoPledge)
+  assert (isNone repoCannotSeeMarginPledge)
+
+  -- A stale plan cannot reuse either consumed position.
+  stalePlan <- submit parties.allocator do
+    createCmd GlobalAllocationPlan with
+      planId = "STALE-PLAN"
+      institution = parties.institutionK
+      allocator = parties.allocator
+      requirementCids = [marginRequirement, repoRequirement]
+      benchmarkCids = [localA, localB]
+      lines =
+        [ AllocationLine with
+            positionCid = corporatePosition
+            requirementCid = marginRequirement
+            quantity = 1.0
+        , AllocationLine with
+            positionCid = governmentPosition
+            requirementCid = repoRequirement
+            quantity = 0.9
+        ]
+      claimedLocalCost = 1.52
+      claimedGlobalCost = 0.245
+  submitMustFail parties.institutionK do exerciseCmd stalePlan Approve

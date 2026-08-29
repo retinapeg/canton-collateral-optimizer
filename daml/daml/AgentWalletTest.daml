@@ -1,0 +1,113 @@
+module AgentWalletTest where
+
+import AgentWallet
+import DA.Optional (isNone)
+import DA.Time (addRelTime, hours)
+import Daml.Script
+
+agentWalletSecurity : Script ()
+agentWalletSecurity = script do
+  issuer <- allocatePartyByHint (PartyIdHint "DemoTokenIssuer")
+  alice <- allocatePartyByHint (PartyIdHint "WalletOwner")
+  agent <- allocatePartyByHint (PartyIdHint "ShoppingAgent")
+  merchant <- allocatePartyByHint (PartyIdHint "ApprovedMerchant")
+  attacker <- allocatePartyByHint (PartyIdHint "UnapprovedMerchant")
+  now <- getTime
+  let deadline = addRelTime now (hours 24)
+
+  funds <- submit issuer do
+    createCmd DemoCash with
+      issuer; owner = alice; delegate = agent; amount = 150.0
+
+  proposal <- submit alice do
+    createCmd SpendMandateProposal with
+      mandateId = "AGENT-WALLET-001"
+      owner = alice
+      agent
+      tokenIssuer = issuer
+      totalCap = 100.0
+      allowedCounterparties = [merchant]
+      expiresAt = deadline
+      fundsCid = funds
+
+  mandate <- submit agent do exerciseCmd proposal Accept
+
+  -- A permitted purchase succeeds without a new owner signature.  The choice
+  -- transfers value, returns change and records the exact permission used.
+  paid <- submit agent do
+    exerciseCmd mandate Pay with
+      counterparty = merchant
+      amount = 30.0
+      purpose = "API subscription"
+
+  Some merchantCash <- queryContractId merchant paid.paymentCid
+  assert (merchantCash.owner == merchant)
+  assert (merchantCash.amount == 30.0)
+
+  Some liveMandate <- queryContractId alice paid.mandateCid
+  assert (liveMandate.spent == 30.0)
+
+  Some audit <- queryContractId alice paid.auditCid
+  assert (audit.mandateId == "AGENT-WALLET-001")
+  assert (audit.purpose == "API subscription")
+  assert (audit.spentBefore == 0.0)
+  assert (audit.spentAfter == 30.0)
+  assert (audit.totalCap == 100.0)
+
+  -- The same direct ledger call is rejected for a forbidden recipient.
+  submitMustFail agent do
+    exerciseCmd paid.mandateCid Pay with
+      counterparty = attacker
+      amount = 1.0
+      purpose = "Prompt-injected payment"
+
+  -- Splitting the spend does not evade the lifetime cap.
+  submitMustFail agent do
+    exerciseCmd paid.mandateCid Pay with
+      counterparty = merchant
+      amount = 71.0
+      purpose = "Over cap"
+
+  -- Only the named agent controls Pay.
+  submitMustFail attacker do
+    exerciseCmd paid.mandateCid Pay with
+      counterparty = merchant
+      amount = 1.0
+      purpose = "Stolen mandate"
+
+  -- Revocation consumes the mandate immediately and needs no agent approval.
+  submit alice do exerciseCmd paid.mandateCid Revoke
+  revoked <- queryContractId alice paid.mandateCid
+  assert (isNone revoked)
+  submitMustFail agent do
+    exerciseCmd paid.mandateCid Pay with
+      counterparty = merchant
+      amount = 1.0
+      purpose = "After revocation"
+
+  -- Expiration is checked explicitly in Pay; Time fields enforce nothing by
+  -- themselves.  A co-signed expired mandate cannot move value.
+  expiredFunds <- submit issuer do
+    createCmd DemoCash with
+      issuer; owner = alice; delegate = agent; amount = 10.0
+  expiredMandate <- submitMulti [alice, agent] [] do
+    createCmd SpendMandate with
+      mandateId = "EXPIRED-WALLET"
+      owner = alice
+      agent
+      tokenIssuer = issuer
+      totalCap = 10.0
+      spent = 0.0
+      allowedCounterparties = [merchant]
+      expiresAt = now
+      fundsCid = Some expiredFunds
+  submitMustFail agent do
+    exerciseCmd expiredMandate Pay with
+      counterparty = merchant
+      amount = 1.0
+      purpose = "After expiry"
+
+  -- Audit survives revocation and stays readable by the human owner.
+  ownerAudit <- query @SpendAudit alice
+  assert (length ownerAudit == 1)
+  pure ()

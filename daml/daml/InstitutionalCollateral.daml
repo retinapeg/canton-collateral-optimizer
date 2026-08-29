@@ -1,0 +1,352 @@
+module InstitutionalCollateral where
+
+-- Counterparty-specific economics.  Haircuts and delivery costs belong to an
+-- asset/obligation pair, not just to the security in isolation.
+data EligibilityTerm = EligibilityTerm with
+  assetClass : Text
+  haircut : Decimal
+  unitCost : Decimal
+    deriving (Eq, Show)
+
+findEligibility : Text -> [EligibilityTerm] -> Optional EligibilityTerm
+findEligibility _ [] = None
+findEligibility assetClass (term :: rest) =
+  if term.assetClass == assetClass
+  then Some term
+  else findEligibility assetClass rest
+
+allDistinct : Eq a => [a] -> Bool
+allDistinct [] = True
+allDistinct (value :: rest) =
+  not (value `elem` rest) && allDistinct rest
+
+-- A position is jointly attested by the institution that owns the securities
+-- and the custodian whose depot records them.  Only the appointed optimiser is
+-- added to the private view.
+template DepotPosition
+  with
+    institution : Party
+    custodian : Party
+    allocator : Party
+    positionId : Text
+    depotId : Text
+    assetId : Text
+    assetClass : Text
+    marketValue : Decimal
+    availableQuantity : Decimal
+  where
+    signatory institution, custodian
+    observer allocator
+
+    ensure
+      positionId /= ""
+      && depotId /= ""
+      && assetId /= ""
+      && assetClass /= ""
+      && marketValue > 0.0
+      && availableQuantity > 0.0
+
+    -- K can reserve its own collateral after approving a global plan.  The
+    -- original position is consumed immediately, so a stale competing plan
+    -- cannot allocate it again.  Any unused quantity remains in the depot.
+    choice Reserve : Optional (ContractId DepotPosition)
+      with quantity : Decimal
+      controller institution
+      do
+        assertMsg "reservation quantity must be positive" (quantity > 0.0)
+        assertMsg "reservation exceeds depot availability"
+          (quantity <= availableQuantity)
+        if quantity < availableQuantity then do
+          residualCid <- create this with
+            availableQuantity = availableQuantity - quantity
+          pure (Some residualCid)
+        else
+          pure None
+
+-- The beneficiary and K jointly acknowledge the obligation.  Different
+-- requirements can apply different haircuts/costs to the same asset class.
+template InstitutionalRequirement
+  with
+    institution : Party
+    beneficiary : Party
+    allocator : Party
+    requirementId : Text
+    purpose : Text
+    requiredEffectiveValue : Decimal
+    eligibilityTerms : [EligibilityTerm]
+  where
+    signatory institution, beneficiary
+    observer allocator
+
+    ensure
+      requirementId /= ""
+      && purpose /= ""
+      && requiredEffectiveValue > 0.0
+      && eligibilityTerms /= []
+      && all (\term ->
+        term.assetClass /= ""
+        && term.haircut >= 0.0
+        && term.haircut < 1.0
+        && term.unitCost >= 0.0) eligibilityTerms
+
+-- Evidence produced by running the same optimiser inside one depot boundary.
+-- The global plan binds these contracts so its displayed saving is auditable.
+template LocalOptimisationBenchmark
+  with
+    institution : Party
+    allocator : Party
+    benchmarkId : Text
+    depotId : Text
+    totalCost : Decimal
+  where
+    signatory allocator
+    observer institution
+
+    ensure
+      benchmarkId /= ""
+      && depotId /= ""
+      && totalCost >= 0.0
+
+data AllocationLine = AllocationLine with
+  positionCid : ContractId DepotPosition
+  requirementCid : ContractId InstitutionalRequirement
+  quantity : Decimal
+    deriving (Eq, Show)
+
+data VerifiedAllocationLine = VerifiedAllocationLine with
+  positionCid : ContractId DepotPosition
+  requirementCid : ContractId InstitutionalRequirement
+  positionId : Text
+  depotId : Text
+  assetId : Text
+  assetClass : Text
+  custodian : Party
+  beneficiary : Party
+  requirementId : Text
+  purpose : Text
+  quantity : Decimal
+  effectiveValue : Decimal
+  cost : Decimal
+    deriving (Eq, Show)
+
+data ApprovalResult = ApprovalResult with
+  instructionCids : [ContractId CollateralExecutionInstruction]
+  residualPositionCids : [Optional (ContractId DepotPosition)]
+    deriving (Eq, Show)
+
+-- The optimiser signs the recommendation; K alone decides whether to approve
+-- it. Contract IDs pin every line to the exact positions and requirements read
+-- by the optimiser.  One position may appear once per plan, which makes the
+-- reservation transition deterministic and atomic.
+template GlobalAllocationPlan
+  with
+    planId : Text
+    institution : Party
+    allocator : Party
+    requirementCids : [ContractId InstitutionalRequirement]
+    benchmarkCids : [ContractId LocalOptimisationBenchmark]
+    lines : [AllocationLine]
+    claimedLocalCost : Decimal
+    claimedGlobalCost : Decimal
+  where
+    signatory allocator
+    observer institution
+
+    ensure
+      planId /= ""
+      && requirementCids /= []
+      && benchmarkCids /= []
+      && lines /= []
+      && claimedLocalCost >= 0.0
+      && claimedGlobalCost >= 0.0
+
+    choice Approve : ApprovalResult
+      controller institution
+      do
+        assertMsg "requirements must be unique"
+          (allDistinct requirementCids)
+        assertMsg "a depot position may only appear once in a plan"
+          (allDistinct (map (\line -> line.positionCid) lines))
+        assertMsg "allocation quantities must be positive"
+          (all (\line -> line.quantity > 0.0) lines)
+
+        requirements <- forA requirementCids \requirementCid -> do
+          requirement <- fetch requirementCid
+          assertMsg "requirement belongs to another institution"
+            (requirement.institution == institution)
+          assertMsg "requirement uses another allocator"
+            (requirement.allocator == allocator)
+          pure requirement
+
+        benchmarks <- forA benchmarkCids \benchmarkCid -> do
+          benchmark <- fetch benchmarkCid
+          assertMsg "benchmark belongs to another institution"
+            (benchmark.institution == institution)
+          assertMsg "benchmark uses another allocator"
+            (benchmark.allocator == allocator)
+          pure benchmark
+
+        assertMsg "local benchmark total does not match the claim"
+          (sum (map (\benchmark -> benchmark.totalCost) benchmarks)
+            == claimedLocalCost)
+
+        verifiedLines <- forA lines \line -> do
+          position <- fetch line.positionCid
+          requirement <- fetch line.requirementCid
+          assertMsg "position belongs to another institution"
+            (position.institution == institution)
+          assertMsg "position uses another allocator"
+            (position.allocator == allocator)
+          assertMsg "requirement belongs to another institution"
+            (requirement.institution == institution)
+          assertMsg "requirement uses another allocator"
+            (requirement.allocator == allocator)
+          assertMsg "line references an undeclared requirement"
+            (line.requirementCid `elem` requirementCids)
+          assertMsg "quantity exceeds depot availability"
+            (line.quantity <= position.availableQuantity)
+
+          assertMsg "asset class is not eligible for this obligation"
+            (case findEligibility position.assetClass requirement.eligibilityTerms of
+              None -> False
+              Some _ -> True)
+          let Some term =
+                findEligibility position.assetClass requirement.eligibilityTerms
+          let effectiveValue =
+                line.quantity * position.marketValue * (1.0 - term.haircut)
+          let cost = line.quantity * term.unitCost
+          pure VerifiedAllocationLine with
+            positionCid = line.positionCid
+            requirementCid = line.requirementCid
+            positionId = position.positionId
+            depotId = position.depotId
+            assetId = position.assetId
+            assetClass = position.assetClass
+            custodian = position.custodian
+            beneficiary = requirement.beneficiary
+            requirementId = requirement.requirementId
+            purpose = requirement.purpose
+            quantity = line.quantity
+            effectiveValue
+            cost
+
+        _ <- forA (zip requirementCids requirements) \(requirementCid, requirement) -> do
+          let allocated = sum
+                [ line.effectiveValue
+                | line <- verifiedLines
+                , line.requirementCid == requirementCid
+                ]
+          assertMsg ("insufficient coverage for " <> requirement.requirementId)
+            (allocated >= requirement.requiredEffectiveValue)
+
+        assertMsg "global plan cost does not match its allocation lines"
+          (sum (map (\line -> line.cost) verifiedLines) == claimedGlobalCost)
+        assertMsg "global plan does not improve on local optimisation"
+          (claimedGlobalCost < claimedLocalCost)
+
+        -- Validate the complete plan first, then reserve all positions and
+        -- create all private settlement instructions in this one transaction.
+        residualPositionCids <- forA verifiedLines \line ->
+          exercise line.positionCid Reserve with quantity = line.quantity
+
+        instructionCids <- forA verifiedLines \line ->
+          create CollateralExecutionInstruction with
+            planId
+            institution
+            allocator
+            custodian = line.custodian
+            beneficiary = line.beneficiary
+            positionId = line.positionId
+            depotId = line.depotId
+            assetId = line.assetId
+            assetClass = line.assetClass
+            requirementId = line.requirementId
+            purpose = line.purpose
+            quantity = line.quantity
+            effectiveValue = line.effectiveValue
+            cost = line.cost
+
+        pure ApprovalResult with instructionCids; residualPositionCids
+
+-- Only the custodian operating the selected depot can settle its instruction.
+-- It sees no other depot's instruction or inventory.
+template CollateralExecutionInstruction
+  with
+    planId : Text
+    institution : Party
+    allocator : Party
+    custodian : Party
+    beneficiary : Party
+    positionId : Text
+    depotId : Text
+    assetId : Text
+    assetClass : Text
+    requirementId : Text
+    purpose : Text
+    quantity : Decimal
+    effectiveValue : Decimal
+    cost : Decimal
+  where
+    signatory institution, allocator
+    observer custodian, beneficiary
+
+    ensure
+      planId /= ""
+      && positionId /= ""
+      && depotId /= ""
+      && assetId /= ""
+      && requirementId /= ""
+      && quantity > 0.0
+      && effectiveValue > 0.0
+      && cost >= 0.0
+
+    choice Execute : ContractId PledgedCollateral
+      controller custodian
+      do
+        create PledgedCollateral with
+          planId
+          institution
+          allocator
+          custodian
+          beneficiary
+          positionId
+          depotId
+          assetId
+          assetClass
+          requirementId
+          purpose
+          quantity
+          effectiveValue
+          cost
+
+-- Final bilateral settlement state.  The beneficiary learns only the assets
+-- pledged to it, never K's remaining inventory or unrelated obligations.
+template PledgedCollateral
+  with
+    planId : Text
+    institution : Party
+    allocator : Party
+    custodian : Party
+    beneficiary : Party
+    positionId : Text
+    depotId : Text
+    assetId : Text
+    assetClass : Text
+    requirementId : Text
+    purpose : Text
+    quantity : Decimal
+    effectiveValue : Decimal
+    cost : Decimal
+  where
+    signatory institution, custodian
+    observer allocator, beneficiary
+
+    ensure
+      planId /= ""
+      && positionId /= ""
+      && depotId /= ""
+      && assetId /= ""
+      && requirementId /= ""
+      && quantity > 0.0
+      && effectiveValue > 0.0
+      && cost >= 0.0

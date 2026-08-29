@@ -1,0 +1,204 @@
+module AgentWallet where
+
+-- A deliberately small fungible asset used to prove that Pay moves value in
+-- the same ledger transaction as the mandate checks.  For the event demo this
+-- adapter can be replaced by the network token-standard transfer interface.
+template DemoCash
+  with
+    issuer : Party
+    owner : Party
+    delegate : Party
+    amount : Decimal
+  where
+    signatory issuer
+    observer owner, delegate
+
+    ensure amount > 0.0
+
+    choice SplitAndTransfer : CashTransferResult
+      with
+        newOwner : Party
+        transferAmount : Decimal
+      controller owner
+      do
+        assertMsg "transfer amount must be positive" (transferAmount > 0.0)
+        assertMsg "insufficient wallet funds" (transferAmount <= amount)
+
+        paymentCid <- create this with
+          owner = newOwner
+          delegate = newOwner
+          amount = transferAmount
+
+        changeCid <-
+          if transferAmount < amount then do
+            cid <- create this with amount = amount - transferAmount
+            pure (Some cid)
+          else
+            pure None
+
+        pure CashTransferResult with paymentCid; changeCid
+
+data CashTransferResult = CashTransferResult with
+  paymentCid : ContractId DemoCash
+  changeCid : Optional (ContractId DemoCash)
+    deriving (Eq, Show)
+
+-- Permanent, human-readable evidence of what the agent did and which mandate
+-- authorised it.  It remains active when the rolling mandate is consumed.
+template SpendAudit
+  with
+    mandateId : Text
+    owner : Party
+    agent : Party
+    counterparty : Party
+    amount : Decimal
+    purpose : Text
+    spentBefore : Decimal
+    spentAfter : Decimal
+    totalCap : Decimal
+    authorisedAt : Time
+    expiresAt : Time
+    paymentCid : ContractId DemoCash
+  where
+    signatory owner
+    observer agent, counterparty
+
+    ensure
+      mandateId /= ""
+      && purpose /= ""
+      && amount > 0.0
+      && spentBefore >= 0.0
+      && spentAfter == spentBefore + amount
+      && spentAfter <= totalCap
+
+data PaymentResult = PaymentResult with
+  mandateCid : ContractId SpendMandate
+  paymentCid : ContractId DemoCash
+  auditCid : ContractId SpendAudit
+    deriving (Eq, Show)
+
+-- The owner delegates tightly bounded payment authority to the AI agent.
+-- Every security rule is enforced here, on-ledger, before value moves.
+template SpendMandate
+  with
+    mandateId : Text
+    owner : Party
+    agent : Party
+    tokenIssuer : Party
+    totalCap : Decimal
+    spent : Decimal
+    allowedCounterparties : [Party]
+    expiresAt : Time
+    fundsCid : Optional (ContractId DemoCash)
+  where
+    signatory owner, agent
+
+    ensure
+      mandateId /= ""
+      && totalCap > 0.0
+      && spent >= 0.0
+      && spent <= totalCap
+      && allowedCounterparties /= []
+
+    choice Pay : PaymentResult
+      with
+        counterparty : Party
+        amount : Decimal
+        purpose : Text
+      controller agent
+      do
+        now <- getTime
+        assertMsg "mandate expired" (now < expiresAt)
+        assertMsg "payment amount must be positive" (amount > 0.0)
+        assertMsg "payment purpose is required" (purpose /= "")
+        assertMsg "counterparty is not allowed"
+          (counterparty `elem` allowedCounterparties)
+        assertMsg "payment would exceed the total cap"
+          (spent + amount <= totalCap)
+
+        case fundsCid of
+          None -> abort "wallet has no funds"
+          Some cashCid -> do
+            cash <- fetch cashCid
+            assertMsg "wallet holding belongs to another owner"
+              (cash.owner == owner)
+            assertMsg "payment asset has the wrong issuer"
+              (cash.issuer == tokenIssuer)
+
+            transfer <- exercise cashCid SplitAndTransfer with
+              newOwner = counterparty
+              transferAmount = amount
+
+            auditCid <- create SpendAudit with
+              mandateId
+              owner
+              agent
+              counterparty
+              amount
+              purpose
+              spentBefore = spent
+              spentAfter = spent + amount
+              totalCap
+              authorisedAt = now
+              expiresAt
+              paymentCid = transfer.paymentCid
+
+            mandateCid <- create this with
+              spent = spent + amount
+              fundsCid = transfer.changeCid
+
+            pure PaymentResult with
+              mandateCid
+              paymentCid = transfer.paymentCid
+              auditCid
+
+    -- Consuming the mandate removes the agent's authority immediately.  Any
+    -- unspent DemoCash remains owned by the owner and is not locked.
+    choice Revoke : ()
+      controller owner
+      do pure ()
+
+-- The owner cannot force a co-signed mandate on an agent.  The agent explicitly
+-- accepts the proposal; the owner's authority comes from this proposal.
+template SpendMandateProposal
+  with
+    mandateId : Text
+    owner : Party
+    agent : Party
+    tokenIssuer : Party
+    totalCap : Decimal
+    allowedCounterparties : [Party]
+    expiresAt : Time
+    fundsCid : ContractId DemoCash
+  where
+    signatory owner
+    observer agent
+
+    ensure
+      mandateId /= ""
+      && totalCap > 0.0
+      && allowedCounterparties /= []
+
+    choice Accept : ContractId SpendMandate
+      controller agent
+      do
+        now <- getTime
+        assertMsg "cannot accept an expired mandate" (now < expiresAt)
+        cash <- fetch fundsCid
+        assertMsg "wallet holding belongs to another owner" (cash.owner == owner)
+        assertMsg "payment asset has the wrong issuer"
+          (cash.issuer == tokenIssuer)
+        create SpendMandate with
+          mandateId
+          owner
+          agent
+          tokenIssuer
+          totalCap
+          spent = 0.0
+          allowedCounterparties
+          expiresAt
+          fundsCid = Some fundsCid
+
+    choice Reject : ()
+      controller agent
+      do pure ()
