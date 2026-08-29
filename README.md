@@ -27,10 +27,12 @@ does not store credentials in the repository.
 ## Selected hackathon track: D1 AI wallet
 
 The repository also contains the selected Cantor8 Daml challenge: a
-spend-limited wallet for an AI agent. Start with the
-[`D1_SPEND_LIMITED_WALLET.md`](daml/D1_SPEND_LIMITED_WALLET.md) track guide,
-then open [`Mandate.daml`](daml/daml/Mandate.daml) and
-[`MandateTest.daml`](daml/daml/MandateTest.daml).
+spend-limited wallet for an AI agent. It is isolated from the collateral project
+in [`track-exercises/d1-spend-limited-wallet/`](track-exercises/d1-spend-limited-wallet/README.md),
+with its own Daml package, tests and VS Code configuration.
+
+Open that folder directly in a second VS Code window to work on the exercise
+without loading it into the main collateral optimiser's build.
 
 The current checkpoint enforces a total cap, expiry, controller authority and
 instant revocation on the Daml ledger. Real token movement, counterparty

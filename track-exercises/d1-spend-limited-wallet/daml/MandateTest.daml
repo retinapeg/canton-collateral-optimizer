@@ -1,4 +1,4 @@
--- Run from the daml directory with: dpm test
+-- Run from the exercise directory with: dpm test
 module MandateTest where
 
 import DA.Time (addRelTime, hours)

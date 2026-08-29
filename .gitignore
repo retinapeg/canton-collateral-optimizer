@@ -45,7 +45,6 @@ service-account*.json
 
 # IDE / operating system
 .DS_Store
-.vscode/
 .idea/
 
 # Local Codex project metadata and synced reference material
