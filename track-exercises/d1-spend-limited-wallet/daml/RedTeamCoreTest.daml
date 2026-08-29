@@ -376,6 +376,7 @@ redTeam10ValidAgentAfterRevocationFailsAtomically = script do
   assert (length activeAfter == 0)
   assert (length auditsBefore == 1)
   assert (length auditsAfter == 1)
+  assert (map toAuditSnapshot auditsBefore == map toAuditSnapshot auditsAfter)
 
 
 -- Attack 11: a successful consuming Charge makes its old CID stale.  A replay
@@ -478,6 +479,13 @@ redTeamDistinctOwnerAndAgentRequired = script do
       expiresAt
       allowedCounterparties = [merchant]
       mandateReference = "RED-DIRECT-ROLE-ALIAS"
+
+  proposals <- query @MandateProposal actor
+  mandates <- query @Mandate actor
+  audits <- query @ChargeRecord actor
+  assert (length proposals == 0)
+  assert (length mandates == 0)
+  assert (length audits == 0)
 
 
 -- Additional audit-quality rule: an empty memo cannot create a replacement or
