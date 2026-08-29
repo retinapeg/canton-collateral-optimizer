@@ -654,13 +654,14 @@ def print_optimizer_section(
     print("\n[1] GLOBAL OPTIMIZER\n")
     print(f"Local / greedy objective score: {LOCAL_OBJECTIVE_SCORE:.1f}")
     print(f"Global optimum objective score: {result.total_cost:.1f}")
-    print(f"Improvement: {improvement:.1f}")
-    print(f"Reduction: approximately {reduction:.1f}%")
+    print(f"Objective-score improvement: {improvement:.1f}")
+    print(f"Objective-score reduction: approximately {reduction:.1f}%")
     print(
-        "\nThe optimiser minimizes a normalized allocation cost derived from the "
-        "eligibility/cost matrix. Lower is better. In this illustrative scenario "
-        f"the score falls from {LOCAL_OBJECTIVE_SCORE:.1f} to "
-        f"{result.total_cost:.1f}, a reduction of approximately {reduction:.1f}%."
+        "\nThe optimiser minimizes a normalized allocation objective score "
+        "derived from eligibility and allocation-preference inputs. Lower is "
+        "better. In this illustrative scenario the objective score falls from "
+        f"{LOCAL_OBJECTIVE_SCORE:.1f} to {result.total_cost:.1f}, an improvement "
+        f"of approximately {reduction:.1f}%."
     )
     print("\nOptimal allocation:\n")
     for instruction in instructions:
