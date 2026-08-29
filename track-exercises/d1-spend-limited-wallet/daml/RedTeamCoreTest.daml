@@ -1,0 +1,528 @@
+-- Independent release-gate attacks for the production authorization model.
+--
+-- These tests intentionally submit invalid transactions to Daml.  They then
+-- query the ledger and compare complete mandate/audit snapshots so a passing
+-- test cannot be explained by a client-side pre-check or a partial mutation.
+module RedTeamCoreTest where
+
+import DA.Time (addRelTime, hours)
+import Daml.Script
+import Mandate
+
+
+data TestParties = TestParties
+  with
+    owner : Party
+    agent : Party
+    merchantA : Party
+    merchantB : Party
+  deriving (Eq, Show)
+
+
+data AuditSnapshot = AuditSnapshot
+  with
+    auditCid : ContractId ChargeRecord
+    owner : Party
+    agent : Party
+    counterparty : Party
+    amount : Decimal
+    transactionTime : Time
+    memo : Text
+    mandateReference : Text
+    previousSpent : Decimal
+    newSpent : Decimal
+    cap : Decimal
+    remainingAllowance : Decimal
+    expiresAt : Time
+    allowedCounterpartiesAtCharge : [Party]
+  deriving (Eq, Show)
+
+
+data ActiveSnapshot = ActiveSnapshot
+  with
+    mandateCid : ContractId Mandate
+    owner : Party
+    agent : Party
+    cap : Decimal
+    spent : Decimal
+    expiresAt : Time
+    allowedCounterparties : [Party]
+    mandateReference : Text
+    activeMandateCount : Int
+    auditCount : Int
+    auditProjection : [AuditSnapshot]
+  deriving (Eq, Show)
+
+
+toAuditSnapshot : (ContractId ChargeRecord, ChargeRecord) -> AuditSnapshot
+toAuditSnapshot (auditCid, audit) = AuditSnapshot with
+  auditCid
+  owner = audit.owner
+  agent = audit.agent
+  counterparty = audit.counterparty
+  amount = audit.amount
+  transactionTime = audit.transactionTime
+  memo = audit.memo
+  mandateReference = audit.mandateReference
+  previousSpent = audit.previousSpent
+  newSpent = audit.newSpent
+  cap = audit.cap
+  remainingAllowance = audit.remainingAllowance
+  expiresAt = audit.expiresAt
+  allowedCounterpartiesAtCharge = audit.allowedCounterpartiesAtCharge
+
+
+allocateTestParties : Script TestParties
+allocateTestParties = script do
+  owner <- allocateParty "RedTeamOwner"
+  agent <- allocateParty "RedTeamAgent"
+  merchantA <- allocateParty "RedTeamMerchantA"
+  merchantB <- allocateParty "RedTeamMerchantB"
+  pure TestParties with owner; agent; merchantA; merchantB
+
+
+createAcceptedMandate
+  : TestParties
+  -> [Party]
+  -> Decimal
+  -> Time
+  -> Text
+  -> Script (ContractId Mandate)
+createAcceptedMandate parties allowedCounterparties cap expiresAt mandateReference = do
+  proposalCid <- submit parties.owner do
+    createCmd MandateProposal with
+      owner = parties.owner
+      agent = parties.agent
+      cap
+      expiresAt
+      allowedCounterparties
+      mandateReference
+  submit parties.agent do exerciseCmd proposalCid Accept
+
+
+charge
+  : Party
+  -> ContractId Mandate
+  -> Party
+  -> Decimal
+  -> Text
+  -> Script ChargeResult
+charge actor mandateCid counterparty amount memo =
+  submit actor do
+    exerciseCmd mandateCid Charge with counterparty; amount; memo
+
+
+captureActive
+  : Party
+  -> ContractId Mandate
+  -> Script ActiveSnapshot
+captureActive visibleTo mandateCid = do
+  Some mandate <- queryContractId visibleTo mandateCid
+  mandates <- query @Mandate visibleTo
+  audits <- query @ChargeRecord visibleTo
+  pure ActiveSnapshot with
+    mandateCid
+    owner = mandate.owner
+    agent = mandate.agent
+    cap = mandate.cap
+    spent = mandate.spent
+    expiresAt = mandate.expiresAt
+    allowedCounterparties = mandate.allowedCounterparties
+    mandateReference = mandate.mandateReference
+    activeMandateCount = length mandates
+    auditCount = length audits
+    auditProjection = map toAuditSnapshot audits
+
+
+assertUnchanged : Text -> ActiveSnapshot -> ActiveSnapshot -> Script ()
+assertUnchanged label before after =
+  assertMsg (label <> ": rejected transaction changed mandate or audit state")
+    (before == after)
+
+
+assertArchived : Text -> Optional a -> Script ()
+assertArchived label value =
+  case value of
+    None -> pure ()
+    Some _ -> abort (label <> ": expected contract to be archived")
+
+
+assertActive : Text -> Optional a -> Script ()
+assertActive label value =
+  case value of
+    Some _ -> pure ()
+    None -> abort (label <> ": expected contract to remain active")
+
+
+-- Attack 1: equality must be accepted after prior spending, not merely when the
+-- initial charge happens to equal the cap.
+redTeam01ExactRemainingAfterSpendSucceeds : Script ()
+redTeam01ExactRemainingAfterSpendSucceeds = script do
+  parties <- allocateTestParties
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  initialCid <- createAcceptedMandate
+    parties [parties.merchantA] 100.0 expiresAt "RED-01-EXACT-REMAINING"
+  first <- charge parties.agent initialCid parties.merchantA 40.0 "first 40"
+  second <- charge parties.agent first.mandateCid parties.merchantA 60.0 "exact remaining 60"
+
+  initial <- queryContractId parties.owner initialCid
+  firstState <- queryContractId parties.owner first.mandateCid
+  Some finalState <- queryContractId parties.owner second.mandateCid
+  audits <- query @ChargeRecord parties.owner
+  Some secondAudit <- queryContractId parties.owner second.auditCid
+  assertArchived "initial mandate" initial
+  assertArchived "first successor mandate" firstState
+  assert (finalState.spent == 100.0)
+  assert (finalState.cap - finalState.spent == 0.0)
+  assert (length audits == 2)
+  assert (secondAudit.previousSpent == 40.0)
+  assert (secondAudit.newSpent == 100.0)
+  assert (secondAudit.remainingAllowance == 0.0)
+
+
+-- Attack 2: one unit above the exact remaining allowance must roll back.
+redTeam02OneAboveRemainingFailsAtomically : Script ()
+redTeam02OneAboveRemainingFailsAtomically = script do
+  parties <- allocateTestParties
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  initialCid <- createAcceptedMandate
+    parties [parties.merchantA] 100.0 expiresAt "RED-02-ONE-ABOVE"
+  first <- charge parties.agent initialCid parties.merchantA 40.0 "first 40"
+  before <- captureActive parties.owner first.mandateCid
+
+  submitMustFail parties.agent do
+    exerciseCmd first.mandateCid Charge with
+      counterparty = parties.merchantA
+      amount = 61.0
+      memo = "one above remaining"
+
+  after <- captureActive parties.owner first.mandateCid
+  assertUnchanged "one-above-remaining" before after
+
+
+-- Attack 3: several individually small charges cannot cumulatively escape the
+-- cap.  The final 11 would take 30 + 30 + 30 to 101.
+redTeam03SeveralSmallChargesOverflowAtomically : Script ()
+redTeam03SeveralSmallChargesOverflowAtomically = script do
+  parties <- allocateTestParties
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  initialCid <- createAcceptedMandate
+    parties [parties.merchantA] 100.0 expiresAt "RED-03-CUMULATIVE"
+  first <- charge parties.agent initialCid parties.merchantA 30.0 "small charge 1"
+  second <- charge parties.agent first.mandateCid parties.merchantA 30.0 "small charge 2"
+  third <- charge parties.agent second.mandateCid parties.merchantA 30.0 "small charge 3"
+  before <- captureActive parties.owner third.mandateCid
+
+  submitMustFail parties.agent do
+    exerciseCmd third.mandateCid Charge with
+      counterparty = parties.merchantA
+      amount = 11.0
+      memo = "cumulative overflow"
+
+  after <- captureActive parties.owner third.mandateCid
+  assert (before.spent == 90.0)
+  assert (before.auditCount == 3)
+  assertUnchanged "several-small-charges" before after
+
+
+-- Attack 4: zero is sent to the ledger and rejected there.
+redTeam04ZeroAmountFailsAtomically : Script ()
+redTeam04ZeroAmountFailsAtomically = script do
+  parties <- allocateTestParties
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  mandateCid <- createAcceptedMandate
+    parties [parties.merchantA] 100.0 expiresAt "RED-04-ZERO"
+  before <- captureActive parties.owner mandateCid
+
+  submitMustFail parties.agent do
+    exerciseCmd mandateCid Charge with
+      counterparty = parties.merchantA
+      amount = 0.0
+      memo = "zero amount attack"
+
+  after <- captureActive parties.owner mandateCid
+  assertUnchanged "zero-amount" before after
+
+
+-- Attack 5: a negative amount is sent to the ledger and rejected there.
+redTeam05NegativeAmountFailsAtomically : Script ()
+redTeam05NegativeAmountFailsAtomically = script do
+  parties <- allocateTestParties
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  mandateCid <- createAcceptedMandate
+    parties [parties.merchantA] 100.0 expiresAt "RED-05-NEGATIVE"
+  before <- captureActive parties.owner mandateCid
+
+  submitMustFail parties.agent do
+    exerciseCmd mandateCid Charge with
+      counterparty = parties.merchantA
+      amount = -1.0
+      memo = "negative amount attack"
+
+  after <- captureActive parties.owner mandateCid
+  assertUnchanged "negative-amount" before after
+
+
+-- Attack 6: a counterparty outside the on-ledger allow-list is rejected.
+redTeam06DisallowedCounterpartyFailsAtomically : Script ()
+redTeam06DisallowedCounterpartyFailsAtomically = script do
+  parties <- allocateTestParties
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  mandateCid <- createAcceptedMandate
+    parties [parties.merchantA] 100.0 expiresAt "RED-06-DISALLOWED"
+  before <- captureActive parties.owner mandateCid
+
+  submitMustFail parties.agent do
+    exerciseCmd mandateCid Charge with
+      counterparty = parties.merchantB
+      amount = 10.0
+      memo = "disallowed counterparty"
+
+  after <- captureActive parties.owner mandateCid
+  assertUnchanged "disallowed-counterparty" before after
+
+
+-- Attack 7: visibility as owner/signatory does not confer Charge authority.
+redTeam07OwnerCannotPretendToBeAgent : Script ()
+redTeam07OwnerCannotPretendToBeAgent = script do
+  parties <- allocateTestParties
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  mandateCid <- createAcceptedMandate
+    parties [parties.merchantA] 100.0 expiresAt "RED-07-OWNER-IMPERSONATION"
+  before <- captureActive parties.owner mandateCid
+
+  submitMustFail parties.owner do
+    exerciseCmd mandateCid Charge with
+      counterparty = parties.merchantA
+      amount = 1.0
+      memo = "owner impersonation"
+
+  after <- captureActive parties.owner mandateCid
+  assertUnchanged "owner-impersonation" before after
+
+
+-- Attack 8: the allowed merchant is granted read visibility for this submit so
+-- the failure isolates controller authorization rather than CID visibility.
+redTeam08MerchantCannotPretendToBeAgent : Script ()
+redTeam08MerchantCannotPretendToBeAgent = script do
+  parties <- allocateTestParties
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  mandateCid <- createAcceptedMandate
+    parties [parties.merchantA] 100.0 expiresAt "RED-08-MERCHANT-IMPERSONATION"
+  before <- captureActive parties.owner mandateCid
+
+  submitMustFail (actAs parties.merchantA <> readAs parties.owner) do
+    exerciseCmd mandateCid Charge with
+      counterparty = parties.merchantA
+      amount = 1.0
+      memo = "merchant impersonation"
+
+  after <- captureActive parties.owner mandateCid
+  assertUnchanged "merchant-impersonation" before after
+
+
+-- Attack 9: advance the ledger to the exact expiry boundary, then prove that
+-- the still-active contract and audit projection are unchanged by rejection.
+redTeam09ValidAgentAfterExpiryFailsAtomically : Script ()
+redTeam09ValidAgentAfterExpiryFailsAtomically = script do
+  parties <- allocateTestParties
+  now <- getTime
+  let expiresAt = addRelTime now (hours 1)
+  mandateCid <- createAcceptedMandate
+    parties [parties.merchantA] 100.0 expiresAt "RED-09-EXPIRY"
+  setTime expiresAt
+  before <- captureActive parties.owner mandateCid
+
+  submitMustFail parties.agent do
+    exerciseCmd mandateCid Charge with
+      counterparty = parties.merchantA
+      amount = 1.0
+      memo = "post-expiry attack"
+
+  after <- captureActive parties.owner mandateCid
+  assertUnchanged "post-expiry" before after
+
+
+-- Attack 10: revocation consumes only the active permission.  Reusing its CID
+-- cannot add a second audit or resurrect a successor.
+redTeam10ValidAgentAfterRevocationFailsAtomically : Script ()
+redTeam10ValidAgentAfterRevocationFailsAtomically = script do
+  parties <- allocateTestParties
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  initialCid <- createAcceptedMandate
+    parties [parties.merchantA] 100.0 expiresAt "RED-10-REVOCATION"
+  successful <- charge parties.agent initialCid parties.merchantA 30.0 "valid before revoke"
+  submit parties.owner do exerciseCmd successful.mandateCid Revoke
+
+  activeBefore <- query @Mandate parties.owner
+  auditsBefore <- query @ChargeRecord parties.owner
+  submitMustFail parties.agent do
+    exerciseCmd successful.mandateCid Charge with
+      counterparty = parties.merchantA
+      amount = 1.0
+      memo = "post-revocation attack"
+  activeAfter <- query @Mandate parties.owner
+  auditsAfter <- query @ChargeRecord parties.owner
+  assert (length activeBefore == 0)
+  assert (length activeAfter == 0)
+  assert (length auditsBefore == 1)
+  assert (length auditsAfter == 1)
+
+
+-- Attack 11: a successful consuming Charge makes its old CID stale.  A replay
+-- against that old CID cannot mutate the returned successor or audit set.
+redTeam11StaleCidAfterSuccessFailsAtomically : Script ()
+redTeam11StaleCidAfterSuccessFailsAtomically = script do
+  parties <- allocateTestParties
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  staleCid <- createAcceptedMandate
+    parties [parties.merchantA] 100.0 expiresAt "RED-11-STALE-AFTER-SUCCESS"
+  successful <- charge parties.agent staleCid parties.merchantA 30.0 "valid charge"
+  staleBefore <- queryContractId parties.owner staleCid
+  before <- captureActive parties.owner successful.mandateCid
+
+  submitMustFail parties.agent do
+    exerciseCmd staleCid Charge with
+      counterparty = parties.merchantA
+      amount = 1.0
+      memo = "stale CID replay"
+
+  staleAfter <- queryContractId parties.owner staleCid
+  after <- captureActive parties.owner successful.mandateCid
+  assertArchived "stale mandate before replay" staleBefore
+  assertArchived "stale mandate after replay" staleAfter
+  assertUnchanged "stale-cid-after-success" before after
+
+
+-- Attack 12: both required controllers are supplied so only the below-spent
+-- numeric invariant can explain rejection.
+redTeam12AdjustBelowSpentFailsAtomically : Script ()
+redTeam12AdjustBelowSpentFailsAtomically = script do
+  parties <- allocateTestParties
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  initialCid <- createAcceptedMandate
+    parties [parties.merchantA] 100.0 expiresAt "RED-12-ADJUST-BELOW-SPENT"
+  successful <- charge parties.agent initialCid parties.merchantA 60.0 "committed spend"
+  before <- captureActive parties.owner successful.mandateCid
+
+  submitMustFail (actAs [parties.owner, parties.agent]) do
+    exerciseCmd successful.mandateCid Adjust with newCap = 59.0
+
+  after <- captureActive parties.owner successful.mandateCid
+  assertUnchanged "adjust-below-spent" before after
+
+
+-- Attack 13: owner-only and agent-only adjustment attempts both fail without
+-- state changes; joint authority is retained as the positive control.
+redTeam13BilateralAdjustmentRequired : Script ()
+redTeam13BilateralAdjustmentRequired = script do
+  parties <- allocateTestParties
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  mandateCid <- createAcceptedMandate
+    parties [parties.merchantA] 100.0 expiresAt "RED-13-BILATERAL"
+  initial <- captureActive parties.owner mandateCid
+
+  submitMustFail parties.owner do
+    exerciseCmd mandateCid Adjust with newCap = 200.0
+  afterOwner <- captureActive parties.owner mandateCid
+  assertUnchanged "owner-only-adjust" initial afterOwner
+
+  submitMustFail parties.agent do
+    exerciseCmd mandateCid Adjust with newCap = 200.0
+  afterAgent <- captureActive parties.owner mandateCid
+  assertUnchanged "agent-only-adjust" initial afterAgent
+
+  adjustedCid <- submit (actAs [parties.owner, parties.agent]) do
+    exerciseCmd mandateCid Adjust with newCap = 200.0
+  Some adjusted <- queryContractId parties.owner adjustedCid
+  assert (adjusted.cap == 200.0)
+  assert (adjusted.spent == 0.0)
+
+
+-- Additional P0 hardening: role aliasing must be rejected on-ledger even though
+-- one physical party could otherwise satisfy both named controller fields.
+redTeamDistinctOwnerAndAgentRequired : Script ()
+redTeamDistinctOwnerAndAgentRequired = script do
+  actor <- allocateParty "RedTeamAliasedRole"
+  merchant <- allocateParty "RedTeamAliasedMerchant"
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+
+  submitMustFail actor do
+    createCmd MandateProposal with
+      owner = actor
+      agent = actor
+      cap = 100.0
+      expiresAt
+      allowedCounterparties = [merchant]
+      mandateReference = "RED-ROLE-ALIAS"
+
+  submitMustFail actor do
+    createCmd Mandate with
+      owner = actor
+      agent = actor
+      cap = 100.0
+      spent = 0.0
+      expiresAt
+      allowedCounterparties = [merchant]
+      mandateReference = "RED-DIRECT-ROLE-ALIAS"
+
+
+-- Additional audit-quality rule: an empty memo cannot create a replacement or
+-- audit record.
+redTeamEmptyMemoFailsAtomically : Script ()
+redTeamEmptyMemoFailsAtomically = script do
+  parties <- allocateTestParties
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  mandateCid <- createAcceptedMandate
+    parties [parties.merchantA] 100.0 expiresAt "RED-EMPTY-MEMO"
+  before <- captureActive parties.owner mandateCid
+
+  submitMustFail parties.agent do
+    exerciseCmd mandateCid Charge with
+      counterparty = parties.merchantA
+      amount = 1.0
+      memo = ""
+
+  after <- captureActive parties.owner mandateCid
+  assertUnchanged "empty-memo" before after
+
+
+-- An expired proposal must remain a proposal and must never create an active
+-- mandate when the agent tries to accept it after the deadline.
+redTeamExpiredProposalCannotBecomeMandate : Script ()
+redTeamExpiredProposalCannotBecomeMandate = script do
+  parties <- allocateTestParties
+  now <- getTime
+  let expiresAt = addRelTime now (hours 1)
+  proposalCid <- submit parties.owner do
+    createCmd MandateProposal with
+      owner = parties.owner
+      agent = parties.agent
+      cap = 100.0
+      expiresAt
+      allowedCounterparties = [parties.merchantA]
+      mandateReference = "RED-EXPIRED-PROPOSAL"
+  setTime expiresAt
+
+  submitMustFail parties.agent do exerciseCmd proposalCid Accept
+
+  proposal <- queryContractId parties.owner proposalCid
+  mandates <- query @Mandate parties.owner
+  audits <- query @ChargeRecord parties.owner
+  assertActive "expired proposal" proposal
+  assert (length mandates == 0)
+  assert (length audits == 0)
