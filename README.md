@@ -24,6 +24,19 @@ The helper also accepts `maintain` and `admin` when those higher permissions
 are deliberately required. It uses the authenticated GitHub CLI session and
 does not store credentials in the repository.
 
+## Selected hackathon track: D1 AI wallet
+
+The repository also contains the selected Cantor8 Daml challenge: a
+spend-limited wallet for an AI agent. Start with the
+[`D1_SPEND_LIMITED_WALLET.md`](daml/D1_SPEND_LIMITED_WALLET.md) track guide,
+then open [`Mandate.daml`](daml/daml/Mandate.daml) and
+[`MandateTest.daml`](daml/daml/MandateTest.daml).
+
+The current checkpoint enforces a total cap, expiry, controller authority and
+instant revocation on the Daml ledger. Real token movement, counterparty
+allow-listing and durable audit receipts are explicitly documented as the next
+implementation steps.
+
 ## Current status
 
 The minimum end-to-end slice is working:

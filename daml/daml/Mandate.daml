@@ -1,0 +1,83 @@
+-- D1 hackathon track: spend-limited wallet for an AI agent.
+--
+-- This starter is adapted from Cantor8's hackathon toolkit:
+-- https://github.com/Cantor8/hackathon-toolkit/tree/main/daml-starter
+--
+-- The important security properties are enforced here on the ledger. A check
+-- in a Python or web backend could be bypassed by submitting directly to the
+-- ledger; these checks cannot.
+--
+-- Current checkpoint:
+--   * a total lifetime spending cap
+--   * a positive-amount rule
+--   * an expiry deadline
+--   * instant owner-controlled revocation
+--   * bilateral approval before raising or lowering the cap
+--
+-- Next track steps:
+--   * move real Canton Coin instead of only recording the amount
+--   * restrict payments to an allow-list of counterparties
+--   * create a human-readable audit contract for every charge
+module Mandate where
+
+
+template Mandate
+  with
+    owner     : Party    -- who owns the funds
+    agent     : Party    -- the AI agent authorised to spend
+    cap       : Decimal  -- total spend allowed during this mandate
+    spent     : Decimal  -- total already charged
+    expiresAt : Time
+  where
+    ensure cap > 0.0 && spent >= 0.0 && spent <= cap
+
+    -- Both parties consent before the mandate becomes active.
+    signatory owner, agent
+
+    -- The agent can charge without a new owner signature, but only while all
+    -- ledger-enforced rules below remain true.
+    choice Charge : ContractId Mandate
+      with amount : Decimal
+      controller agent
+      do
+        now <- getTime
+        assertMsg "mandate expired" (now < expiresAt)
+        assertMsg "amount must be positive" (amount > 0.0)
+        assertMsg "charge would exceed the cap" (spent + amount <= cap)
+        create this with spent = spent + amount
+
+    -- The owner can stop the agent immediately. The agent cannot veto or delay
+    -- this choice because it is not a controller.
+    choice Revoke : ()
+      controller owner
+      do pure ()
+
+    -- Changing the cap requires both signatories. The new cap can never be
+    -- lower than the value that has already been spent.
+    choice Adjust : ContractId Mandate
+      with newCap : Decimal
+      controller owner, agent
+      do
+        assertMsg "new cap below what is already spent" (newCap >= spent)
+        create this with cap = newCap
+
+
+-- The owner cannot force a mandate on the agent. The owner proposes it and the
+-- agent explicitly accepts or rejects it later.
+template MandateProposal
+  with
+    owner     : Party
+    agent     : Party
+    cap       : Decimal
+    expiresAt : Time
+  where
+    signatory owner
+    observer agent
+
+    choice Accept : ContractId Mandate
+      controller agent
+      do create Mandate with owner; agent; cap; spent = 0.0; expiresAt
+
+    choice Reject : ()
+      controller agent
+      do pure ()
