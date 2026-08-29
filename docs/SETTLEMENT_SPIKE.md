@@ -33,6 +33,15 @@ superseded as proof evidence.
 Immutable Daml hardening commit:
 `08e98952b223299f3537c7a12c83326c11eb2798`.
 
+A second red-team pass found an accepted-but-unchargeable empty-`assetId`
+context: the later audit invariant correctly rolled the Charge back, but the
+malformed mandate should never have become active. Successor commit
+`eb2757723868104faf8cddd0bb4114cb08665192` enforces nonempty `assetId` at
+`DemoAsset`, `MandateProposal` and `Mandate`, and directly proves all three
+malformed creation paths fail without changing the valid asset or creating any
+proposal, mandate, merchant asset or audit. This successor is required for the
+current PROVEN decision.
+
 ## Protected baseline
 
 - Repository baseline: `1f8aba1a2dc68f60b5e74fbca8b887e225927103`
@@ -41,6 +50,8 @@ Immutable Daml hardening commit:
   `2dcf171fb2dd2c0f5714b97efbc0421ee3673d5c`
 - Required hardening commit:
   `08e98952b223299f3537c7a12c83326c11eb2798`
+- Required empty-identifier hardening commit:
+  `eb2757723868104faf8cddd0bb4114cb08665192`
 - The existing `Mandate.daml`, `MandateTest.daml`, backend and demo scripts were
   not modified.
 - The original dirty `main` checkout was not touched. Work was performed in an
@@ -170,6 +181,7 @@ with OpenJDK 17:
 | `testSettlementFailureCannotConsumePermission` | Amount 60 is valid under cap 100 but bound asset contains only 50; nested `Pay` fails and the original mandate remains at `spent = 0` with the 50-unit asset unchanged and no audit | PASS |
 | `testRoleAliasCannotCreatePermissionOrAudit` | A single party supplied as both owner and agent cannot create a proposal, mandate or audit record; this protects delegation/audit role separation without denying the holder's legitimate direct asset authority | PASS |
 | `testExpiredProposalCannotBeAccepted` | Accept at the exact ledger-time expiry boundary fails; the proposal and 100-unit asset remain active, with no mandate, merchant asset or audit | PASS |
+| `testEmptyAssetIdCannotCreateSettlementContext` | Empty internal instrument IDs are rejected at issuance, proposal and direct mandate creation; the valid 100-unit asset stays unchanged and no permission, merchant asset or audit appears | PASS |
 | `testSettlementReleaseSequenceConservesValueAndAudit` | Literal 30 success, 80 over-cap rejection, Merchant-B 10 rejection, owner revocation and stale 1 rejection finish at Owner 70 / Merchant-A 30 / Merchant-B 0 / total 100 with exactly one 30-unit audit | PASS |
 
 The pre-existing tests also remained green:
@@ -206,7 +218,7 @@ The only warnings observed were pre-existing:
 Neither warning was changed in this settlement-owned spike.
 
 The clean spike-only DAR reported main package ID
-`0c5b5a0774fc93d7b803b8f449148d68865f99fa75e96755067059c2a693e93e`.
+`67f523d394cbb24543d494d10af5cf45bfe1894a89d734f99000c840535ff179`.
 That ID is evidence for this branch only, not the final combined release DAR:
 merging the separately hardened core changes will produce a different package
 ID, which the adapter must derive dynamically after its own clean build.
@@ -255,7 +267,7 @@ cherry-pick it alone onto the baseline. For the complete settlement model and
 tests, cherry-pick the inclusive implementation range:
 
 ```bash
-git cherry-pick 2dcf171^..08e9895
+git cherry-pick 2dcf171^..eb27577
 ```
 
 The final documentation-only handoff commit is reported separately with the
