@@ -14,6 +14,9 @@ demo_on_exit() {
     exit_status="$cleanup_status"
   fi
   if [[ "$exit_status" -ne 0 ]]; then
+    if [[ -n "${DEMO_JSON_ARTIFACT:-}" && -n "${DEMO_CSV_ARTIFACT:-}" ]]; then
+      rm -f "$DEMO_JSON_ARTIFACT" "$DEMO_CSV_ARTIFACT"
+    fi
     printf '\nDEMO FAIL\n'
     printf 'Logs: %s\n' "$DEMO_RUN_DIR"
   fi
@@ -28,6 +31,17 @@ trap 'exit 129' HUP
 cd "$DEMO_ROOT"
 mkdir -p "$DEMO_RUN_DIR"
 demo_acquire_lock
+
+DEMO_ARTIFACT_DIR="$DEMO_ROOT/artifacts"
+DEMO_JSON_STAGE="$DEMO_RUN_DIR/demo_run.json"
+DEMO_CSV_STAGE="$DEMO_RUN_DIR/demo_run.csv"
+DEMO_JSON_ARTIFACT="$DEMO_ARTIFACT_DIR/demo_run.json"
+DEMO_CSV_ARTIFACT="$DEMO_ARTIFACT_DIR/demo_run.csv"
+rm -f \
+  "$DEMO_JSON_STAGE" \
+  "$DEMO_CSV_STAGE" \
+  "$DEMO_JSON_ARTIFACT" \
+  "$DEMO_CSV_ARTIFACT"
 
 if ! "$DEMO_ROOT/setup_demo.sh" --quiet; then
   demo_fail "Environment setup failed. Run ./setup_demo.sh for the detailed check."
@@ -61,6 +75,8 @@ printf '✓ Collateral and wallet packages loaded\n\n'
 # query, reconciliation, and authorization proof as one coherent [1]-[6] flow.
 if ! "$DEMO_PYTHON" -B -m backend.allocation_demo \
   --base-url "$DEMO_LEDGER_URL" \
+  --json-output "$DEMO_JSON_STAGE" \
+  --csv-output "$DEMO_CSV_STAGE" \
   2>&1 | tee "$DEMO_RUN_DIR/allocation-demo.log"; then
   demo_fail "The optimizer-to-ledger institutional allocation failed."
   exit 1
@@ -119,5 +135,20 @@ printf '✓ revocation enforced under load and afterwards\n'
 printf '✓ audit reconciles\n'
 printf '✓ statement written to agent_wallet/out/statement.html\n\n'
 
+if [[ ! -s "$DEMO_JSON_STAGE" || ! -s "$DEMO_CSV_STAGE" ]]; then
+  demo_fail "Verified demo export files were not produced."
+  exit 1
+fi
+if ! demo_cleanup_canton; then
+  demo_fail "Canton cleanup failed; demo results were not published."
+  exit 1
+fi
+mkdir -p "$DEMO_ARTIFACT_DIR"
+mv "$DEMO_JSON_STAGE" "$DEMO_JSON_ARTIFACT"
+mv "$DEMO_CSV_STAGE" "$DEMO_CSV_ARTIFACT"
+
 printf 'FULL DEMO PASS\n'
-printf '==================================================\n'
+printf '==================================================\n\n'
+printf 'GRAPHIC DATA EXPORTED\n'
+printf 'JSON: artifacts/demo_run.json\n'
+printf 'CSV:  artifacts/demo_run.csv\n'

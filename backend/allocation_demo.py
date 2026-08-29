@@ -8,10 +8,13 @@ and references used by the local Canton demonstration.
 from __future__ import annotations
 
 import argparse
+import csv
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
+import json
 from math import isclose
+from pathlib import Path
 from typing import Any
 
 from backend.canton import ActiveContract, CantonClient, LedgerApiError
@@ -23,6 +26,18 @@ MODULE_NAME = "CollateralAllocation"
 REFERENCE_PREFIX = "optimizer-allocation-"
 LOCAL_OBJECTIVE_SCORE = 101.0
 TRANSACTION_RECEIPT_SEPARATOR = "=" * 60
+CSV_FIELDS = (
+    "optimizer_asset",
+    "ledger_asset",
+    "source",
+    "recipient",
+    "quantity",
+    "reference",
+    "proposal_update_id",
+    "accept_update_id",
+    "contract_id",
+    "status",
+)
 
 OPTIMIZER_SUPPLIES = {"Asset1": 1.0, "Asset2": 1.0}
 OPTIMIZER_DEMANDS = {"InstitutionB": 1.0, "InstitutionC": 1.0}
@@ -112,6 +127,11 @@ def party_display(hint: str) -> str:
 def decimal_display(value: Decimal) -> str:
     rendered = format(value, "f")
     return rendered.rstrip("0").rstrip(".") if "." in rendered else rendered
+
+
+def decimal_json_number(value: Decimal) -> int | float:
+    integral = value.to_integral_value()
+    return int(integral) if value == integral else float(value)
 
 
 def transaction_from_submit_response(response: Any) -> dict[str, Any]:
@@ -643,6 +663,102 @@ def reconcile(
             )
 
 
+def export_demo_run(
+    result: AllocationResult,
+    instructions: Sequence[AllocationInstruction],
+    flow: LedgerFlowResult,
+    *,
+    json_output: str,
+    csv_output: str,
+) -> None:
+    """Export only the optimizer and Canton state verified by this run."""
+
+    if result.total_cost is None:
+        raise RuntimeError("Cannot export a missing optimizer objective score")
+
+    rows: list[dict[str, Any]] = []
+    required_by_recipient: dict[str, Decimal] = {}
+    received_by_recipient: dict[str, Decimal] = {}
+
+    for instruction, allocation in zip(instructions, flow.allocations, strict=True):
+        create_transaction = transaction_from_submit_response(
+            flow.create_responses[instruction.reference]
+        )
+        accept_transaction = transaction_from_submit_response(
+            flow.accept_responses[instruction.reference]
+        )
+        if allocation.contract_id not in created_contract_ids(accept_transaction):
+            raise RuntimeError(
+                f"Canton Accept transaction did not create {allocation.contract_id}"
+            )
+
+        received_quantity = Decimal(allocation.payload["quantity"])
+        required_by_recipient[instruction.recipient_hint] = (
+            required_by_recipient.get(instruction.recipient_hint, Decimal("0"))
+            + instruction.quantity
+        )
+        received_by_recipient[instruction.recipient_hint] = (
+            received_by_recipient.get(instruction.recipient_hint, Decimal("0"))
+            + received_quantity
+        )
+        rows.append(
+            {
+                "optimizer_asset": instruction.optimizer_asset,
+                "ledger_asset": allocation.payload["asset"],
+                "source": party_display(instruction.source_hint),
+                "recipient": party_display(instruction.recipient_hint),
+                "quantity": decimal_json_number(received_quantity),
+                "reference": instruction.reference,
+                "proposal_update_id": create_transaction["updateId"],
+                "accept_update_id": accept_transaction["updateId"],
+                "contract_id": allocation.contract_id,
+                "status": "ACTIVE",
+            }
+        )
+
+    global_score = float(result.total_cost)
+    improvement = LOCAL_OBJECTIVE_SCORE - global_score
+    reduction = improvement / LOCAL_OBJECTIVE_SCORE * 100.0
+    payload = {
+        "optimizer": {
+            "local_objective_score": LOCAL_OBJECTIVE_SCORE,
+            "global_objective_score": round(global_score, 1),
+            "improvement": round(improvement, 1),
+            "reduction_percent": round(reduction, 1),
+        },
+        "allocations": rows,
+        "reconciliation": {
+            "instructions_generated": len(instructions),
+            "instructions_committed": len(flow.allocations),
+            "bank_b_required": decimal_json_number(required_by_recipient["BankB"]),
+            "bank_b_received": decimal_json_number(received_by_recipient["BankB"]),
+            "bank_c_required": decimal_json_number(required_by_recipient["BankC"]),
+            "bank_c_received": decimal_json_number(received_by_recipient["BankC"]),
+            "pass": True,
+        },
+        "authorization": {
+            "bank_a_accept_bank_b_rejected": flow.authorization_rejected,
+        },
+        "ledger": {
+            "platform": "Canton",
+            "contract_language": "Daml",
+            "mode": "local sandbox",
+        },
+    }
+
+    json_path = Path(json_output)
+    csv_path = Path(csv_output)
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with json_path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+        handle.write("\n")
+    with csv_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def print_optimizer_section(
     result: AllocationResult, instructions: Sequence[AllocationInstruction]
 ) -> None:
@@ -743,7 +859,11 @@ def main() -> None:
         description="Run every global optimiser allocation on local Canton"
     )
     parser.add_argument("--base-url", default="http://localhost:7575")
+    parser.add_argument("--json-output")
+    parser.add_argument("--csv-output")
     args = parser.parse_args()
+    if bool(args.json_output) != bool(args.csv_output):
+        parser.error("--json-output and --csv-output must be supplied together")
 
     try:
         result = run_optimizer()
@@ -753,6 +873,14 @@ def main() -> None:
         print("\n\n[3] DAML SMART CONTRACTS")
         flow = run_ledger_flow(CantonClient(args.base_url), instructions)
         reconcile(instructions, flow)
+        if args.json_output and args.csv_output:
+            export_demo_run(
+                result,
+                instructions,
+                flow,
+                json_output=args.json_output,
+                csv_output=args.csv_output,
+            )
         print_ledger_section(instructions, flow)
         print_reconciliation_section(instructions, flow)
         print_authorization_section(flow)

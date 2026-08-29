@@ -26,6 +26,8 @@ daml-dist/
 log/
 logs/
 *.log
+/artifacts/demo_run.json
+/artifacts/demo_run.csv
 
 # Local secrets and credentials
 .env
