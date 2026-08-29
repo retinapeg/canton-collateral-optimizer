@@ -1,0 +1,192 @@
+module Demo where
+
+import Collateral
+import DA.Optional (isNone)
+import Daml.Script
+
+data DemoParties = DemoParties with
+  bankA : Party
+  bankB : Party
+  allocator : Party
+  ccp : Party
+
+allocateDemoParties : Script DemoParties
+allocateDemoParties = do
+  bankA <- allocatePartyByHint (PartyIdHint "BankA")
+  bankB <- allocatePartyByHint (PartyIdHint "BankB")
+  allocator <- allocatePartyByHint (PartyIdHint "Allocator")
+  ccp <- allocatePartyByHint (PartyIdHint "CCP")
+  pure DemoParties with bankA; bankB; allocator; ccp
+
+createOfferA : DemoParties -> Script (ContractId CollateralOffer)
+createOfferA parties = submit parties.bankA do
+  createCmd CollateralOffer with
+    owner = parties.bankA
+    allocator = parties.allocator
+    assetId = "A-GILT-2030"
+    assetClass = "GOVERNMENT_BOND"
+    marketValue = 100.0
+    haircut = 0.02
+    opportunityCost = 0.5
+    availableQuantity = 10.0
+    location = "Custodian-A"
+
+createOfferB : DemoParties -> Script (ContractId CollateralOffer)
+createOfferB parties = submit parties.bankB do
+  createCmd CollateralOffer with
+    owner = parties.bankB
+    allocator = parties.allocator
+    assetId = "B-CORP-2029"
+    assetClass = "CORPORATE_BOND"
+    marketValue = 100.0
+    haircut = 0.2
+    opportunityCost = 0.4
+    availableQuantity = 10.0
+    location = "Repo-Venue-B"
+
+createRequirementA : DemoParties -> Script (ContractId CollateralRequirement)
+createRequirementA parties = submit parties.ccp do
+  createCmd CollateralRequirement with
+    obligor = parties.bankA
+    beneficiary = parties.ccp
+    allocator = parties.allocator
+    requirementId = "REQ-BANK-A-CCP"
+    requiredEffectiveValue = 500.0
+    eligibleAssetClasses = ["GOVERNMENT_BOND", "CASH"]
+
+createRequirementB : DemoParties -> Script (ContractId CollateralRequirement)
+createRequirementB parties = submit parties.ccp do
+  createCmd CollateralRequirement with
+    obligor = parties.bankB
+    beneficiary = parties.ccp
+    allocator = parties.allocator
+    requirementId = "REQ-BANK-B-CCP"
+    requiredEffectiveValue = 400.0
+    eligibleAssetClasses = ["GOVERNMENT_BOND", "CORPORATE_BOND"]
+
+-- A convenient live-ledger seeding script.  The Python backend can then query
+-- the authorised Allocator view and create proposals from optimiser output.
+setup : Script ()
+setup = script do
+  parties <- allocateDemoParties
+  _ <- createOfferA parties
+  _ <- createOfferB parties
+  _ <- createRequirementA parties
+  _ <- createRequirementB parties
+  pure ()
+
+-- Executable proof of disclosure, control, stale-state protection and the
+-- acceptance state transition.  `dpm test` runs it on the IDE ledger; the same
+-- script can also be submitted to a live Canton Sandbox.
+privacyAndAcceptance : Script ()
+privacyAndAcceptance = script do
+  parties <- allocateDemoParties
+  offerA <- createOfferA parties
+  offerB <- createOfferB parties
+  requirementA <- createRequirementA parties
+  requirementB <- createRequirementB parties
+
+  proposalA <- submit parties.allocator do
+    createCmd ReallocationProposal with
+      allocator = parties.allocator
+      owner = parties.bankA
+      offerCid = offerA
+      requirementCid = requirementA
+      assetId = "A-GILT-2030"
+      requirementId = "REQ-BANK-A-CCP"
+      quantity = 5.1020408164
+
+  _proposalB <- submit parties.allocator do
+    createCmd ReallocationProposal with
+      allocator = parties.allocator
+      owner = parties.bankB
+      offerCid = offerB
+      requirementCid = requirementB
+      assetId = "B-CORP-2029"
+      requirementId = "REQ-BANK-B-CCP"
+      quantity = 1.0
+
+  allocatorOffers <- query @CollateralOffer parties.allocator
+  bankAOffers <- query @CollateralOffer parties.bankA
+  bankBOffers <- query @CollateralOffer parties.bankB
+  assert (length allocatorOffers == 2)
+  assert (length bankAOffers == 1)
+  assert (length bankBOffers == 1)
+
+  bankACannotSeeB <- queryContractId parties.bankA offerB
+  bankBCannotSeeA <- queryContractId parties.bankB offerA
+  assert (isNone bankACannotSeeB)
+  assert (isNone bankBCannotSeeA)
+
+  bankAProposals <- query @ReallocationProposal parties.bankA
+  bankBProposals <- query @ReallocationProposal parties.bankB
+  assert (length bankAProposals == 1)
+  assert (length bankBProposals == 1)
+
+  submitMustFail parties.allocator do
+    exerciseCmd proposalA Accept
+  submitMustFail parties.bankB do
+    exerciseCmd proposalA Accept
+
+  -- Neither party can bypass the proposal flow and mint a final allocation
+  -- unilaterally.  Accept combines the allocator's proposal authority with the
+  -- owner's choice authority to create the bilateral contract.
+  submitMustFail parties.bankA do
+    createCmd CollateralAllocation with
+      allocator = parties.allocator
+      owner = parties.bankA
+      beneficiary = parties.ccp
+      assetId = "A-GILT-2030"
+      requirementId = "REQ-BANK-A-CCP"
+      quantity = 5.1020408164
+      effectiveValue = 500.0000000072
+      location = "Custodian-A"
+
+  submitMustFail parties.allocator do
+    createCmd CollateralAllocation with
+      allocator = parties.allocator
+      owner = parties.bankA
+      beneficiary = parties.ccp
+      assetId = "A-GILT-2030"
+      requirementId = "REQ-BANK-A-CCP"
+      quantity = 5.1020408164
+      effectiveValue = 500.0000000072
+      location = "Custodian-A"
+
+  staleProposal <- submit parties.allocator do
+    createCmd ReallocationProposal with
+      allocator = parties.allocator
+      owner = parties.bankA
+      offerCid = offerA
+      requirementCid = requirementA
+      assetId = "A-GILT-2030"
+      requirementId = "REQ-BANK-A-CCP"
+      quantity = 1.0
+
+  accepted <- submit parties.bankA do
+    exerciseCmd proposalA Accept
+
+  oldOffer <- queryContractId parties.bankA offerA
+  oldProposal <- queryContractId parties.bankA proposalA
+  assert (isNone oldOffer)
+  assert (isNone oldProposal)
+
+  let Some remainingOfferCid = accepted.remainingOfferCid
+  Some remainingOffer <- queryContractId parties.bankA remainingOfferCid
+  assert (remainingOffer.availableQuantity == 4.8979591836)
+
+  Some allocationForBankA <-
+    queryContractId parties.bankA accepted.allocationCid
+  Some allocationForAllocator <-
+    queryContractId parties.allocator accepted.allocationCid
+  Some allocationForCcp <-
+    queryContractId parties.ccp accepted.allocationCid
+  allocationForBankB <-
+    queryContractId parties.bankB accepted.allocationCid
+  assert (allocationForBankA.quantity == 5.1020408164)
+  assert (allocationForAllocator == allocationForBankA)
+  assert (allocationForCcp == allocationForBankA)
+  assert (isNone allocationForBankB)
+
+  submitMustFail parties.bankA do
+    exerciseCmd staleProposal Accept

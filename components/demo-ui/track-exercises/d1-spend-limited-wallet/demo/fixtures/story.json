@@ -1,0 +1,234 @@
+{
+  "description": "Fixed UI-development replay. It never evaluates policy or contacts a ledger.",
+  "mode": "OFFLINE FIXTURE",
+  "initial_state": {
+    "owner": null,
+    "agent": null,
+    "cap": null,
+    "spent": null,
+    "remaining": null,
+    "expiry": null,
+    "status": "NOT CREATED",
+    "allowed_counterparties": [],
+    "audit_records": []
+  },
+  "snapshots": {
+    "identities": {
+      "demo_id": "fixture-demo-{{RUN}}",
+      "owner": "Owner::fixture-{{RUN}}",
+      "agent": "Agent::fixture-{{RUN}}",
+      "cap": null,
+      "spent": null,
+      "remaining": null,
+      "expiry": null,
+      "status": "NOT CREATED",
+      "allowed_counterparties": [],
+      "audit_records": []
+    },
+    "active_zero": {
+      "demo_id": "fixture-demo-{{RUN}}",
+      "owner": "Owner::fixture-{{RUN}}",
+      "agent": "Agent::fixture-{{RUN}}",
+      "mandate_id": "Mandate::fixture-{{RUN}}",
+      "mandate_contract_id": "MandateContract::fixture-{{RUN}}-initial",
+      "cap": "100.0",
+      "spent": "0.0",
+      "remaining": "100.0",
+      "expiry": "2026-08-29T18:00:00Z",
+      "status": "ACTIVE",
+      "allowed_counterparties": [
+        "Merchant-A"
+      ],
+      "audit_records": []
+    },
+    "active_thirty": {
+      "demo_id": "fixture-demo-{{RUN}}",
+      "owner": "Owner::fixture-{{RUN}}",
+      "agent": "Agent::fixture-{{RUN}}",
+      "mandate_id": "Mandate::fixture-{{RUN}}",
+      "mandate_contract_id": "MandateContract::fixture-{{RUN}}-after-30",
+      "cap": "100.0",
+      "spent": "30.0",
+      "remaining": "70.0",
+      "expiry": "2026-08-29T18:00:00Z",
+      "status": "ACTIVE",
+      "allowed_counterparties": [
+        "Merchant-A"
+      ],
+      "audit_records": [
+        {
+          "record_id": "Audit::fixture-{{RUN}}-001",
+          "sequence": 1,
+          "ledger_offset": null,
+          "transaction_id": "FixtureTransaction::{{RUN}}-001",
+          "mandate_id": "Mandate::fixture-{{RUN}}",
+          "counterparty": "Merchant-A",
+          "amount": "30.0",
+          "recorded_at": "2026-08-29T17:00:03Z"
+        }
+      ]
+    },
+    "revoked_thirty": {
+      "demo_id": "fixture-demo-{{RUN}}",
+      "owner": "Owner::fixture-{{RUN}}",
+      "agent": "Agent::fixture-{{RUN}}",
+      "mandate_id": "Mandate::fixture-{{RUN}}",
+      "mandate_contract_id": "MandateContract::fixture-{{RUN}}-after-30",
+      "cap": "100.0",
+      "spent": "30.0",
+      "remaining": "70.0",
+      "expiry": "2026-08-29T18:00:00Z",
+      "status": "REVOKED",
+      "allowed_counterparties": [
+        "Merchant-A"
+      ],
+      "audit_records": [
+        {
+          "record_id": "Audit::fixture-{{RUN}}-001",
+          "sequence": 1,
+          "ledger_offset": null,
+          "transaction_id": "FixtureTransaction::{{RUN}}-001",
+          "mandate_id": "Mandate::fixture-{{RUN}}",
+          "counterparty": "Merchant-A",
+          "amount": "30.0",
+          "recorded_at": "2026-08-29T17:00:03Z"
+        }
+      ]
+    }
+  },
+  "steps": [
+    {
+      "request": {
+        "command": "setup-demo",
+        "arguments": []
+      },
+      "snapshot": "identities",
+      "result": {
+        "kind": "fixture_result",
+        "outcome": "SIMULATED",
+        "code": "FIXTURE_SETUP_DISPLAY",
+        "message": "Canned identity setup display; no ledger was contacted.",
+        "transaction_id": null,
+        "observed_at": "2026-08-29T17:00:01Z"
+      }
+    },
+    {
+      "request": {
+        "command": "create-mandate",
+        "arguments": []
+      },
+      "snapshot": "active_zero",
+      "result": {
+        "kind": "fixture_result",
+        "outcome": "SIMULATED",
+        "code": "FIXTURE_CREATE_ACCEPT_DISPLAY",
+        "message": "Canned create-and-accept display; no ledger was contacted.",
+        "transaction_id": null,
+        "observed_at": "2026-08-29T17:00:02Z"
+      }
+    },
+    {
+      "request": {
+        "command": "charge",
+        "arguments": [
+          "--counterparty",
+          "Merchant-A",
+          "--amount",
+          "30",
+          "--memo",
+          "Approved Merchant-A purchase"
+        ]
+      },
+      "snapshot": "active_thirty",
+      "result": {
+        "kind": "fixture_result",
+        "outcome": "SIMULATED",
+        "code": "FIXTURE_ACCEPTED_DISPLAY",
+        "message": "Canned accepted-purchase display; no ledger was contacted.",
+        "transaction_id": "FixtureTransaction::{{RUN}}-001",
+        "observed_at": "2026-08-29T17:00:03Z"
+      }
+    },
+    {
+      "request": {
+        "command": "charge",
+        "arguments": [
+          "--counterparty",
+          "Merchant-A",
+          "--amount",
+          "80",
+          "--memo",
+          "Prompt-injection over-cap attempt"
+        ]
+      },
+      "snapshot": "active_thirty",
+      "result": {
+        "kind": "fixture_result",
+        "outcome": "SIMULATED",
+        "code": "FIXTURE_CAP_REJECTION_DISPLAY",
+        "message": "Canned over-cap rejection display; no ledger evaluated this request.",
+        "transaction_id": null,
+        "observed_at": "2026-08-29T17:00:04Z"
+      }
+    },
+    {
+      "request": {
+        "command": "charge",
+        "arguments": [
+          "--counterparty",
+          "Merchant-B",
+          "--amount",
+          "10",
+          "--memo",
+          "Disallowed-counterparty attempt"
+        ]
+      },
+      "snapshot": "active_thirty",
+      "result": {
+        "kind": "fixture_result",
+        "outcome": "SIMULATED",
+        "code": "FIXTURE_COUNTERPARTY_REJECTION_DISPLAY",
+        "message": "Canned counterparty rejection display; no ledger evaluated this request.",
+        "transaction_id": null,
+        "observed_at": "2026-08-29T17:00:05Z"
+      }
+    },
+    {
+      "request": {
+        "command": "revoke",
+        "arguments": []
+      },
+      "snapshot": "revoked_thirty",
+      "result": {
+        "kind": "fixture_result",
+        "outcome": "SIMULATED",
+        "code": "FIXTURE_REVOKE_DISPLAY",
+        "message": "Canned revocation display; no ledger was contacted.",
+        "transaction_id": "FixtureTransaction::{{RUN}}-002",
+        "observed_at": "2026-08-29T17:00:06Z"
+      }
+    },
+    {
+      "request": {
+        "command": "charge",
+        "arguments": [
+          "--counterparty",
+          "Merchant-A",
+          "--amount",
+          "1",
+          "--memo",
+          "Post-revocation attempt"
+        ]
+      },
+      "snapshot": "revoked_thirty",
+      "result": {
+        "kind": "fixture_result",
+        "outcome": "SIMULATED",
+        "code": "FIXTURE_POST_REVOKE_REJECTION_DISPLAY",
+        "message": "Canned post-revocation rejection display; no ledger evaluated this request.",
+        "transaction_id": null,
+        "observed_at": "2026-08-29T17:00:07Z"
+      }
+    }
+  ]
+}

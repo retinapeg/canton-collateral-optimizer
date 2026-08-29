@@ -1,0 +1,478 @@
+-- Run from the exercise directory with: dpm test
+module MandateTest where
+
+import DA.Time (addRelTime, hours)
+import Daml.Script
+import Mandate
+
+
+allocateWalletParties : () -> Script (Party, Party, Party, Party)
+allocateWalletParties () = do
+  owner <- allocateParty "WalletOwner"
+  agent <- allocateParty "WalletAgent"
+  merchant <- allocateParty "AllowedMerchant"
+  otherMerchant <- allocateParty "OtherMerchant"
+  pure (owner, agent, merchant, otherMerchant)
+
+
+createAcceptedMandate
+  : Party
+  -> Party
+  -> [Party]
+  -> Decimal
+  -> Time
+  -> Text
+  -> Script (ContractId Mandate)
+createAcceptedMandate owner agent allowedCounterparties cap expiresAt mandateReference = do
+  proposalCid <- submit owner do
+    createCmd MandateProposal with
+      owner
+      agent
+      cap
+      expiresAt
+      allowedCounterparties
+      mandateReference
+
+  submit agent do exerciseCmd proposalCid Accept
+
+
+submitCharge
+  : Party
+  -> ContractId Mandate
+  -> Party
+  -> Decimal
+  -> Text
+  -> Script ChargeResult
+submitCharge agent mandateCid counterparty amount memo =
+  submit agent do
+    exerciseCmd mandateCid Charge with counterparty; amount; memo
+
+
+testAllowListedChargeSucceeds : Script ()
+testAllowListedChargeSucceeds = script do
+  (owner, agent, merchant, _) <- allocateWalletParties ()
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  mandateCid <- createAcceptedMandate
+    owner agent [merchant] 100.0 expiresAt "MANDATE-ALLOW-LISTED"
+
+  result <- submitCharge agent mandateCid merchant 25.0 "Approved supplier invoice"
+
+  Some updatedMandate <- queryContractId owner result.mandateCid
+  Some audit <- queryContractId owner result.auditCid
+  assert (updatedMandate.spent == 25.0)
+  assert (audit.counterparty == merchant)
+  assert (audit.amount == 25.0)
+  pure ()
+
+
+testCumulativeSpendingAcrossTwoCharges : Script ()
+testCumulativeSpendingAcrossTwoCharges = script do
+  (owner, agent, merchant, _) <- allocateWalletParties ()
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  mandateCid <- createAcceptedMandate
+    owner agent [merchant] 100.0 expiresAt "MANDATE-CUMULATIVE"
+
+  first <- submitCharge agent mandateCid merchant 30.0 "First approved charge"
+  second <- submitCharge agent first.mandateCid merchant 50.0 "Second approved charge"
+
+  Some updatedMandate <- queryContractId owner second.mandateCid
+  Some firstAudit <- queryContractId owner first.auditCid
+  Some secondAudit <- queryContractId owner second.auditCid
+  assert (updatedMandate.spent == 80.0)
+  assert (firstAudit.previousSpent == 0.0)
+  assert (firstAudit.newSpent == 30.0)
+  assert (secondAudit.previousSpent == 30.0)
+  assert (secondAudit.newSpent == 80.0)
+  pure ()
+
+
+testChargeOverCapFails : Script ()
+testChargeOverCapFails = script do
+  (owner, agent, merchant, _) <- allocateWalletParties ()
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  mandateCid <- createAcceptedMandate
+    owner agent [merchant] 100.0 expiresAt "MANDATE-CAP-FAILURE"
+  first <- submitCharge agent mandateCid merchant 80.0 "Initial approved charge"
+
+  submitMustFail agent do
+    exerciseCmd first.mandateCid Charge with
+      counterparty = merchant
+      amount = 21.0
+      memo = "Must exceed cumulative cap"
+
+  Some unchangedMandate <- queryContractId owner first.mandateCid
+  audits <- query @ChargeRecord owner
+  assert (unchangedMandate.spent == 80.0)
+  assert (length audits == 1)
+  pure ()
+
+
+testNonAllowListedCounterpartyFails : Script ()
+testNonAllowListedCounterpartyFails = script do
+  (owner, agent, merchant, otherMerchant) <- allocateWalletParties ()
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  mandateCid <- createAcceptedMandate
+    owner agent [merchant] 100.0 expiresAt "MANDATE-COUNTERPARTY-FAILURE"
+
+  submitMustFail agent do
+    exerciseCmd mandateCid Charge with
+      counterparty = otherMerchant
+      amount = 10.0
+      memo = "Unapproved merchant"
+
+  Some unchangedMandate <- queryContractId owner mandateCid
+  audits <- query @ChargeRecord owner
+  assert (unchangedMandate.spent == 0.0)
+  assert (length audits == 0)
+  pure ()
+
+
+testZeroAmountFails : Script ()
+testZeroAmountFails = script do
+  (owner, agent, merchant, _) <- allocateWalletParties ()
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  mandateCid <- createAcceptedMandate
+    owner agent [merchant] 100.0 expiresAt "MANDATE-ZERO-FAILURE"
+
+  submitMustFail agent do
+    exerciseCmd mandateCid Charge with
+      counterparty = merchant
+      amount = 0.0
+      memo = "Zero is not a payment"
+
+  audits <- query @ChargeRecord owner
+  assert (length audits == 0)
+  pure ()
+
+
+testNegativeAmountFails : Script ()
+testNegativeAmountFails = script do
+  (owner, agent, merchant, _) <- allocateWalletParties ()
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  mandateCid <- createAcceptedMandate
+    owner agent [merchant] 100.0 expiresAt "MANDATE-NEGATIVE-FAILURE"
+
+  submitMustFail agent do
+    exerciseCmd mandateCid Charge with
+      counterparty = merchant
+      amount = -1.0
+      memo = "Negative is not a payment"
+
+  audits <- query @ChargeRecord owner
+  assert (length audits == 0)
+  pure ()
+
+
+testOnlyAgentCanCharge : Script ()
+testOnlyAgentCanCharge = script do
+  (owner, agent, merchant, _) <- allocateWalletParties ()
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  mandateCid <- createAcceptedMandate
+    owner agent [merchant] 100.0 expiresAt "MANDATE-CONTROLLER-FAILURE"
+
+  -- The owner is a signatory and can see the contract, so this rejection
+  -- proves controller authorisation rather than a visibility failure.
+  submitMustFail owner do
+    exerciseCmd mandateCid Charge with
+      counterparty = merchant
+      amount = 1.0
+      memo = "Owner must not impersonate agent"
+
+  audits <- query @ChargeRecord owner
+  assert (length audits == 0)
+  pure ()
+
+
+testExpiredMandateFailsAfterLedgerTimeAdvance : Script ()
+testExpiredMandateFailsAfterLedgerTimeAdvance = script do
+  (owner, agent, merchant, _) <- allocateWalletParties ()
+  now <- getTime
+  let expiresAt = addRelTime now (hours 1)
+  mandateCid <- createAcceptedMandate
+    owner agent [merchant] 100.0 expiresAt "MANDATE-EXPIRY-FAILURE"
+
+  -- The rule is strict: a charge at the exact expiry boundary must fail.
+  setTime expiresAt
+  submitMustFail agent do
+    exerciseCmd mandateCid Charge with
+      counterparty = merchant
+      amount = 1.0
+      memo = "Charge at exact expiry"
+
+  audits <- query @ChargeRecord owner
+  assert (length audits == 0)
+  pure ()
+
+
+testOwnerCanRevoke : Script ()
+testOwnerCanRevoke = script do
+  (owner, agent, merchant, _) <- allocateWalletParties ()
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  mandateCid <- createAcceptedMandate
+    owner agent [merchant] 100.0 expiresAt "MANDATE-OWNER-REVOKE"
+
+  submitMustFail agent do exerciseCmd mandateCid Revoke
+  submit owner do exerciseCmd mandateCid Revoke
+
+  activeMandates <- query @Mandate owner
+  assert (length activeMandates == 0)
+  pure ()
+
+
+testStaleMandateCidFailsAfterRevocation : Script ()
+testStaleMandateCidFailsAfterRevocation = script do
+  (owner, agent, merchant, _) <- allocateWalletParties ()
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  staleMandateCid <- createAcceptedMandate
+    owner agent [merchant] 100.0 expiresAt "MANDATE-STALE-CID"
+
+  submit owner do exerciseCmd staleMandateCid Revoke
+  submitMustFail agent do
+    exerciseCmd staleMandateCid Charge with
+      counterparty = merchant
+      amount = 1.0
+      memo = "Revoked mandate must be unusable"
+
+  audits <- query @ChargeRecord owner
+  assert (length audits == 0)
+  pure ()
+
+
+testAdjustCapBelowSpentFails : Script ()
+testAdjustCapBelowSpentFails = script do
+  (owner, agent, merchant, _) <- allocateWalletParties ()
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  mandateCid <- createAcceptedMandate
+    owner agent [merchant] 100.0 expiresAt "MANDATE-ADJUST-BELOW-SPENT"
+  charged <- submitCharge agent mandateCid merchant 60.0 "Committed spend"
+
+  submitMustFail (actAs [owner, agent]) do
+    exerciseCmd charged.mandateCid Adjust with newCap = 50.0
+
+  Some unchangedMandate <- queryContractId owner charged.mandateCid
+  assert (unchangedMandate.cap == 100.0)
+  assert (unchangedMandate.spent == 60.0)
+  pure ()
+
+
+testCapAdjustmentAuthorization : Script ()
+testCapAdjustmentAuthorization = script do
+  (owner, agent, merchant, _) <- allocateWalletParties ()
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  mandateCid <- createAcceptedMandate
+    owner agent [merchant] 100.0 expiresAt "MANDATE-ADJUST-AUTH"
+
+  submitMustFail owner do
+    exerciseCmd mandateCid Adjust with newCap = 200.0
+  submitMustFail agent do
+    exerciseCmd mandateCid Adjust with newCap = 200.0
+
+  adjustedCid <- submit (actAs [owner, agent]) do
+    exerciseCmd mandateCid Adjust with newCap = 200.0
+
+  Some adjustedMandate <- queryContractId owner adjustedCid
+  assert (adjustedMandate.cap == 200.0)
+  assert (adjustedMandate.spent == 0.0)
+  pure ()
+
+
+testOnlySuccessfulChargesCreateAuditRecords : Script ()
+testOnlySuccessfulChargesCreateAuditRecords = script do
+  (owner, agent, merchant, otherMerchant) <- allocateWalletParties ()
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  mandateCid <- createAcceptedMandate
+    owner agent [merchant] 100.0 expiresAt "MANDATE-AUDIT-ATOMICITY"
+
+  before <- query @ChargeRecord owner
+  assert (length before == 0)
+
+  submitMustFail agent do
+    exerciseCmd mandateCid Charge with
+      counterparty = otherMerchant
+      amount = 10.0
+      memo = "Unapproved merchant"
+  submitMustFail agent do
+    exerciseCmd mandateCid Charge with
+      counterparty = merchant
+      amount = 101.0
+      memo = "Over cap"
+  submitMustFail agent do
+    exerciseCmd mandateCid Charge with
+      counterparty = merchant
+      amount = 0.0
+      memo = "Zero amount"
+  -- The agent cannot bypass Charge and fabricate a jointly signed audit.
+  submitMustFail agent do
+    createCmd ChargeRecord with
+      owner
+      agent
+      counterparty = merchant
+      amount = 1.0
+      transactionTime = now
+      memo = "Forged audit attempt"
+      mandateReference = "MANDATE-AUDIT-ATOMICITY"
+      previousSpent = 0.0
+      newSpent = 1.0
+      cap = 100.0
+      remainingAllowance = 99.0
+      expiresAt
+      allowedCounterpartiesAtCharge = [merchant]
+
+  afterFailures <- query @ChargeRecord owner
+  assert (length afterFailures == 0)
+
+  successful <- submitCharge agent mandateCid merchant 10.0 "Only successful audit"
+  afterSuccess <- query @ChargeRecord owner
+  assert (length afterSuccess == 1)
+
+  -- The successful consuming choice made the original CID stale.
+  submitMustFail agent do
+    exerciseCmd mandateCid Charge with
+      counterparty = merchant
+      amount = 1.0
+      memo = "Stale CID"
+  submitMustFail agent do
+    exerciseCmd successful.mandateCid Charge with
+      counterparty = merchant
+      amount = 91.0
+      memo = "Cumulative over cap"
+
+  finalAudits <- query @ChargeRecord owner
+  assert (length finalAudits == 1)
+  pure ()
+
+
+testAuditFieldsAndRemainingAllowance : Script ()
+testAuditFieldsAndRemainingAllowance = script do
+  (owner, agent, merchant, backupMerchant) <- allocateWalletParties ()
+  setupTime <- getTime
+  let expiresAt = addRelTime setupTime (hours 24)
+  let allowedCounterparties = [merchant, backupMerchant]
+  let mandateReference = "MANDATE-AUDIT-FIELDS"
+  let memo = "Invoice INV-2026-0001"
+  mandateCid <- createAcceptedMandate
+    owner agent allowedCounterparties 100.0 expiresAt mandateReference
+
+  beforeCharge <- getTime
+  result <- submitCharge agent mandateCid merchant 25.0 memo
+  afterCharge <- getTime
+
+  Some updatedMandate <- queryContractId owner result.mandateCid
+  Some audit <- queryContractId owner result.auditCid
+  assert (audit.owner == owner)
+  assert (audit.agent == agent)
+  assert (audit.counterparty == merchant)
+  assert (audit.amount == 25.0)
+  assert (audit.transactionTime >= beforeCharge)
+  assert (audit.transactionTime <= afterCharge)
+  assert (audit.memo == memo)
+  assert (audit.mandateReference == mandateReference)
+  assert (audit.previousSpent == 0.0)
+  assert (audit.newSpent == 25.0)
+  assert (audit.cap == 100.0)
+  assert (audit.remainingAllowance == 75.0)
+  assert (audit.expiresAt == expiresAt)
+  assert (audit.allowedCounterpartiesAtCharge == allowedCounterparties)
+  assert (updatedMandate.spent == audit.newSpent)
+  assert (updatedMandate.cap - updatedMandate.spent == audit.remainingAllowance)
+  pure ()
+
+
+testChargeExactlyAtCapSucceeds : Script ()
+testChargeExactlyAtCapSucceeds = script do
+  (owner, agent, merchant, _) <- allocateWalletParties ()
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  mandateCid <- createAcceptedMandate
+    owner agent [merchant] 100.0 expiresAt "MANDATE-EXACT-CAP"
+
+  result <- submitCharge agent mandateCid merchant 100.0 "Exact cap boundary"
+
+  Some updatedMandate <- queryContractId owner result.mandateCid
+  Some audit <- queryContractId owner result.auditCid
+  assert (updatedMandate.spent == 100.0)
+  assert (audit.remainingAllowance == 0.0)
+  pure ()
+
+
+testReleaseDemoAttackSequence : Script ()
+testReleaseDemoAttackSequence = script do
+  owner <- allocateParty "WalletOwner"
+  agent <- allocateParty "WalletAgent"
+  merchantA <- allocateParty "Merchant-A"
+  merchantB <- allocateParty "Merchant-B"
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  mandateCid <- createAcceptedMandate
+    owner agent [merchantA] 100.0 expiresAt "MANDATE-RELEASE-DEMO"
+
+  successful <- submitCharge agent mandateCid merchantA 30.0 "Merchant-A approved 30"
+
+  Some replacement <- queryContractId owner successful.mandateCid
+  Some successfulAudit <- queryContractId owner successful.auditCid
+  assert (replacement.spent == 30.0)
+  assert (replacement.cap - replacement.spent == 70.0)
+  assert (successfulAudit.remainingAllowance == 70.0)
+
+  submitMustFail agent do
+    exerciseCmd successful.mandateCid Charge with
+      counterparty = merchantA
+      amount = 80.0
+      memo = "Merchant-A cumulative cap attack"
+  submitMustFail agent do
+    exerciseCmd successful.mandateCid Charge with
+      counterparty = merchantB
+      amount = 10.0
+      memo = "Merchant-B allow-list attack"
+
+  submit owner do exerciseCmd successful.mandateCid Revoke
+  submitMustFail agent do
+    exerciseCmd successful.mandateCid Charge with
+      counterparty = merchantA
+      amount = 1.0
+      memo = "Charge against revoked CID"
+
+  finalAudits <- query @ChargeRecord owner
+  Some finalAudit <- queryContractId owner successful.auditCid
+  assert (length finalAudits == 1)
+  assert (finalAudit.counterparty == merchantA)
+  assert (finalAudit.amount == 30.0)
+  assert (finalAudit.previousSpent == 0.0)
+  assert (finalAudit.newSpent == 30.0)
+  assert (finalAudit.remainingAllowance == 70.0)
+  pure ()
+
+
+testProposalCanBeRejected : Script ()
+testProposalCanBeRejected = script do
+  (owner, agent, merchant, _) <- allocateWalletParties ()
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  proposalCid <- submit owner do
+    createCmd MandateProposal with
+      owner
+      agent
+      cap = 100.0
+      expiresAt
+      allowedCounterparties = [merchant]
+      mandateReference = "MANDATE-REJECTED-PROPOSAL"
+
+  submit agent do exerciseCmd proposalCid Reject
+
+  activeProposals <- query @MandateProposal owner
+  activeMandates <- query @Mandate owner
+  assert (length activeProposals == 0)
+  assert (length activeMandates == 0)
+  pure ()

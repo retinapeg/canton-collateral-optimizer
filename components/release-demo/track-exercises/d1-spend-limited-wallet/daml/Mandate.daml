@@ -1,0 +1,162 @@
+-- D1 hackathon track: spend-limited wallet for an AI agent.
+--
+-- This starter is adapted from Cantor8's hackathon toolkit:
+-- https://github.com/Cantor8/hackathon-toolkit/tree/main/daml-starter
+--
+-- The important security properties are enforced here on the ledger. A check
+-- in a Python or web backend could be bypassed by submitting directly to the
+-- ledger; these checks cannot.
+--
+-- This package deliberately models an authorisation and its audit trail, not
+-- an actual token transfer. Every spending rule is enforced in the consuming
+-- Charge choice so a client cannot bypass it by submitting directly to Canton.
+module Mandate where
+
+
+data ChargeResult = ChargeResult
+  with
+    mandateCid : ContractId Mandate
+    auditCid : ContractId ChargeRecord
+
+
+template Mandate
+  with
+    owner     : Party     -- who owns the funds
+    agent     : Party     -- the AI agent authorised to spend
+    cap       : Decimal   -- total spend allowed during this mandate
+    spent     : Decimal   -- total already charged
+    expiresAt : Time
+    allowedCounterparties : [Party]
+    mandateReference : Text
+  where
+    ensure
+      owner /= agent
+        && cap > 0.0
+        && spent >= 0.0
+        && spent <= cap
+        && mandateReference /= ""
+
+    -- Both parties consent before the mandate becomes active.
+    signatory owner, agent
+
+    -- The agent can charge without a new owner signature, but only while all
+    -- ledger-enforced rules below remain true. This consuming choice archives
+    -- the old mandate and creates its successor and audit record atomically.
+    choice Charge : ChargeResult
+      with
+        counterparty : Party
+        amount : Decimal
+        memo : Text
+      controller agent
+      do
+        now <- getTime
+        let newSpent = spent + amount
+        assertMsg "mandate expired" (now < expiresAt)
+        assertMsg "amount must be positive" (amount > 0.0)
+        assertMsg "counterparty is not allow-listed" (counterparty `elem` allowedCounterparties)
+        assertMsg "charge would exceed the cap" (newSpent <= cap)
+        assertMsg "memo must not be empty" (memo /= "")
+
+        newMandateCid <- create this with spent = newSpent
+        auditCid <- create ChargeRecord with
+          owner
+          agent
+          counterparty
+          amount
+          transactionTime = now
+          memo
+          mandateReference
+          previousSpent = spent
+          newSpent
+          cap
+          remainingAllowance = cap - newSpent
+          expiresAt
+          allowedCounterpartiesAtCharge = allowedCounterparties
+
+        pure ChargeResult with mandateCid = newMandateCid; auditCid
+
+    -- The owner can stop the agent immediately. The agent cannot veto or delay
+    -- this choice because it is not a controller.
+    choice Revoke : ()
+      controller owner
+      do pure ()
+
+    -- Changing the cap requires both signatories. The new cap can never be
+    -- lower than the value that has already been spent.
+    choice Adjust : ContractId Mandate
+      with newCap : Decimal
+      controller owner, agent
+      do
+        assertMsg "new cap must be positive" (newCap > 0.0)
+        assertMsg "new cap below what is already spent" (newCap >= spent)
+        create this with cap = newCap
+
+
+-- The owner cannot force a mandate on the agent. The owner proposes it and the
+-- agent explicitly accepts or rejects it later.
+template MandateProposal
+  with
+    owner     : Party
+    agent     : Party
+    cap       : Decimal
+    expiresAt : Time
+    allowedCounterparties : [Party]
+    mandateReference : Text
+  where
+    ensure owner /= agent && cap > 0.0 && mandateReference /= ""
+
+    signatory owner
+    observer agent
+
+    choice Accept : ContractId Mandate
+      controller agent
+      do
+        now <- getTime
+        assertMsg "proposal expired" (now < expiresAt)
+        create Mandate with
+          owner
+          agent
+          cap
+          spent = 0.0
+          expiresAt
+          allowedCounterparties
+          mandateReference
+
+    choice Reject : ()
+      controller agent
+      do pure ()
+
+
+-- ChargeRecord has no mutable business choices. Its payload and the ledger
+-- transaction that created it remain immutable; owner and agent are the only
+-- stakeholders, so the complete allow-list snapshot is not leaked to merchants.
+template ChargeRecord
+  with
+    owner : Party
+    agent : Party
+    counterparty : Party
+    amount : Decimal
+    transactionTime : Time
+    memo : Text
+    mandateReference : Text
+    previousSpent : Decimal
+    newSpent : Decimal
+    cap : Decimal
+    remainingAllowance : Decimal
+    expiresAt : Time
+    allowedCounterpartiesAtCharge : [Party]
+  where
+    ensure
+      owner /= agent
+        && amount > 0.0
+        && memo /= ""
+        && mandateReference /= ""
+        && previousSpent >= 0.0
+        && newSpent == previousSpent + amount
+        && cap > 0.0
+        && newSpent <= cap
+        && remainingAllowance == cap - newSpent
+        && transactionTime < expiresAt
+        && counterparty `elem` allowedCounterpartiesAtCharge
+
+    signatory owner, agent

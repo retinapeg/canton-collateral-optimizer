@@ -81,5 +81,3 @@ template MandateProposal
     choice Reject : ()
       controller agent
       do pure ()
-
-

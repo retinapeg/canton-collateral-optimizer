@@ -1,0 +1,69 @@
+-- Run from the exercise directory with: dpm test
+module MandateTest where
+
+import DA.Time (addRelTime, hours)
+import Daml.Script
+import Mandate
+
+
+-- This is the minimum judged D1 proof: a charge under the cap succeeds, a
+-- charge over the cap fails on the ledger, and revocation prevents all later
+-- spending. It also checks controller authority and bilateral cap adjustment.
+testMandate : Script ()
+testMandate = script do
+  owner <- allocateParty "WalletOwner"
+  agent <- allocateParty "WalletAgent"
+  now <- getTime
+  let deadline = addRelTime now (hours 24)
+
+  proposal <- submit owner do
+    createCmd MandateProposal with
+      owner
+      agent
+      cap = 100.0
+      expiresAt = deadline
+
+  mandate <- submit agent do exerciseCmd proposal Accept
+
+  -- Charges below the total cap succeed without another owner signature.
+  mandate <- submit agent do exerciseCmd mandate Charge with amount = 30.0
+  mandate <- submit agent do exerciseCmd mandate Charge with amount = 50.0
+
+  -- This would take total spending to 120. It must fail on the ledger.
+  submitMustFail agent do exerciseCmd mandate Charge with amount = 40.0
+
+  -- The owner cannot impersonate the agent and exercise its spending choice.
+  submitMustFail owner do exerciseCmd mandate Charge with amount = 1.0
+
+  -- The agent cannot raise its own cap. Both signatories must authorise it.
+  submitMustFail agent do exerciseCmd mandate Adjust with newCap = 500.0
+  mandate <- submitMulti [owner, agent] [] do
+    exerciseCmd mandate Adjust with newCap = 200.0
+
+  -- Revocation is immediate and does not require the agent's cooperation.
+  submit owner do exerciseCmd mandate Revoke
+
+  -- The archived mandate cannot be charged after revocation.
+  submitMustFail agent do exerciseCmd mandate Charge with amount = 1.0
+  pure ()
+
+
+-- Deadlines are ordinary fields in Daml and only become security rules when a
+-- choice checks them. This test proves the Charge choice performs that check.
+testExpiredMandate : Script ()
+testExpiredMandate = script do
+  owner <- allocateParty "ExpiredWalletOwner"
+  agent <- allocateParty "ExpiredWalletAgent"
+  now <- getTime
+  let expiredDeadline = addRelTime now (hours (-1))
+
+  proposal <- submit owner do
+    createCmd MandateProposal with
+      owner
+      agent
+      cap = 100.0
+      expiresAt = expiredDeadline
+
+  mandate <- submit agent do exerciseCmd proposal Accept
+  submitMustFail agent do exerciseCmd mandate Charge with amount = 1.0
+  pure ()

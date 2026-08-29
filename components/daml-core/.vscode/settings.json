@@ -1,0 +1,9 @@
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+  "python.terminal.activateEnvironment": true,
+  "terminal.integrated.env.osx": {
+    "JAVA_HOME": "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home",
+    "PATH": "${workspaceFolder}/.venv/bin:/Users/leonardaarons-ditson/.dpm/bin:/opt/homebrew/opt/openjdk@17/bin:${env:PATH}",
+    "VIRTUAL_ENV": "${workspaceFolder}/.venv"
+  }
+}

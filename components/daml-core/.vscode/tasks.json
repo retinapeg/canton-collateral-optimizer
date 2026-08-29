@@ -1,0 +1,161 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Python: Install dependencies",
+      "type": "shell",
+      "command": "python",
+      "args": [
+        "-m",
+        "pip",
+        "install",
+        "-r",
+        "requirements.txt"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "VIRTUAL_ENV": "${workspaceFolder}/.venv",
+          "PATH": "${workspaceFolder}/.venv/bin:/Users/leonardaarons-ditson/.dpm/bin:/opt/homebrew/opt/openjdk@17/bin:${env:PATH}",
+          "JAVA_HOME": "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home"
+        }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Python: Run tests",
+      "type": "shell",
+      "command": "python",
+      "args": [
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests",
+        "-v"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "VIRTUAL_ENV": "${workspaceFolder}/.venv",
+          "PATH": "${workspaceFolder}/.venv/bin:/Users/leonardaarons-ditson/.dpm/bin:/opt/homebrew/opt/openjdk@17/bin:${env:PATH}",
+          "JAVA_HOME": "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home"
+        }
+      },
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Python: Optimise sample market",
+      "type": "shell",
+      "command": "python",
+      "args": [
+        "-m",
+        "optimizer",
+        "sample_data/market.json"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "VIRTUAL_ENV": "${workspaceFolder}/.venv",
+          "PATH": "${workspaceFolder}/.venv/bin:/Users/leonardaarons-ditson/.dpm/bin:/opt/homebrew/opt/openjdk@17/bin:${env:PATH}",
+          "JAVA_HOME": "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home"
+        }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Daml: Build",
+      "type": "shell",
+      "command": "dpm",
+      "args": [
+        "build"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}/daml",
+        "env": {
+          "VIRTUAL_ENV": "${workspaceFolder}/.venv",
+          "PATH": "${workspaceFolder}/.venv/bin:/Users/leonardaarons-ditson/.dpm/bin:/opt/homebrew/opt/openjdk@17/bin:${env:PATH}",
+          "JAVA_HOME": "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home"
+        }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Daml: Test",
+      "type": "shell",
+      "command": "dpm",
+      "args": [
+        "test"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}/daml",
+        "env": {
+          "VIRTUAL_ENV": "${workspaceFolder}/.venv",
+          "PATH": "${workspaceFolder}/.venv/bin:/Users/leonardaarons-ditson/.dpm/bin:/opt/homebrew/opt/openjdk@17/bin:${env:PATH}",
+          "JAVA_HOME": "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home"
+        }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Daml: Build and test",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "Daml: Build",
+        "Daml: Test"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "Canton: Start fresh Sandbox",
+      "type": "shell",
+      "command": "dpm",
+      "args": [
+        "sandbox",
+        "--json-api-port",
+        "7575",
+        "--dar",
+        ".daml/dist/collateral-optimizer-0.0.1.dar"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}/daml",
+        "env": {
+          "VIRTUAL_ENV": "${workspaceFolder}/.venv",
+          "PATH": "${workspaceFolder}/.venv/bin:/Users/leonardaarons-ditson/.dpm/bin:/opt/homebrew/opt/openjdk@17/bin:${env:PATH}",
+          "JAVA_HOME": "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home"
+        }
+      },
+      "presentation": {
+        "panel": "dedicated",
+        "reveal": "always"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Demo: Run live Canton flow",
+      "type": "shell",
+      "command": "python",
+      "args": [
+        "-m",
+        "backend.demo"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "VIRTUAL_ENV": "${workspaceFolder}/.venv",
+          "PATH": "${workspaceFolder}/.venv/bin:/Users/leonardaarons-ditson/.dpm/bin:/opt/homebrew/opt/openjdk@17/bin:${env:PATH}",
+          "JAVA_HOME": "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home"
+        }
+      },
+      "presentation": {
+        "panel": "dedicated",
+        "reveal": "always"
+      },
+      "problemMatcher": []
+    }
+  ]
+}
