@@ -1,0 +1,76 @@
+{
+  "assets": [
+    {
+      "asset_id": "A-GILT-2030",
+      "owner": "BankA",
+      "asset_class": "GOVERNMENT_BOND",
+      "market_value": 100.0,
+      "haircut": 0.02,
+      "opportunity_cost": 0.5,
+      "available_quantity": 10.0,
+      "location": "Custodian-A"
+    },
+    {
+      "asset_id": "A-CASH-GBP",
+      "owner": "BankA",
+      "asset_class": "CASH",
+      "market_value": 1.0,
+      "haircut": 0.0,
+      "opportunity_cost": 0.02,
+      "available_quantity": 1000.0,
+      "location": "Nostro-A"
+    },
+    {
+      "asset_id": "A-BBB-2032",
+      "owner": "BankA",
+      "asset_class": "CORPORATE_BOND",
+      "market_value": 100.0,
+      "haircut": 0.25,
+      "opportunity_cost": 0.25,
+      "available_quantity": 8.0,
+      "location": "Repo-Venue-A"
+    },
+    {
+      "asset_id": "B-GILT-2031",
+      "owner": "BankB",
+      "asset_class": "GOVERNMENT_BOND",
+      "market_value": 100.0,
+      "haircut": 0.05,
+      "opportunity_cost": 0.95,
+      "available_quantity": 5.0,
+      "location": "Custodian-B"
+    },
+    {
+      "asset_id": "B-CORP-2029",
+      "owner": "BankB",
+      "asset_class": "CORPORATE_BOND",
+      "market_value": 100.0,
+      "haircut": 0.2,
+      "opportunity_cost": 0.4,
+      "available_quantity": 10.0,
+      "location": "Repo-Venue-B"
+    }
+  ],
+  "requirements": [
+    {
+      "requirement_id": "REQ-BANK-A-CCP",
+      "obligor": "BankA",
+      "beneficiary": "CCP",
+      "required_effective_value": 500.0,
+      "eligible_asset_classes": [
+        "GOVERNMENT_BOND",
+        "CASH"
+      ]
+    },
+    {
+      "requirement_id": "REQ-BANK-B-CCP",
+      "obligor": "BankB",
+      "beneficiary": "CCP",
+      "required_effective_value": 400.0,
+      "eligible_asset_classes": [
+        "GOVERNMENT_BOND",
+        "CORPORATE_BOND"
+      ]
+    }
+  ]
+}

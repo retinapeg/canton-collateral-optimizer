@@ -1,0 +1,135 @@
+module Collateral where
+
+-- Collateral made visible by its owner to one authorised allocator.
+template CollateralOffer
+  with
+    owner : Party
+    allocator : Party
+    assetId : Text
+    assetClass : Text
+    marketValue : Decimal
+    haircut : Decimal
+    opportunityCost : Decimal
+    availableQuantity : Decimal
+    location : Text
+  where
+    signatory owner
+    observer allocator
+
+    ensure
+      assetId /= ""
+      && assetClass /= ""
+      && marketValue > 0.0
+      && haircut >= 0.0
+      && haircut < 1.0
+      && opportunityCost >= 0.0
+      && availableQuantity > 0.0
+
+-- A beneficiary-published collateral requirement.  In this first slice the
+-- obligor accepts the resulting allocation rather than co-signing creation.
+template CollateralRequirement
+  with
+    obligor : Party
+    beneficiary : Party
+    allocator : Party
+    requirementId : Text
+    requiredEffectiveValue : Decimal
+    eligibleAssetClasses : [Text]
+  where
+    signatory beneficiary
+    observer obligor, allocator
+
+    ensure
+      requirementId /= ""
+      && requiredEffectiveValue > 0.0
+      && eligibleAssetClasses /= []
+
+-- The bilateral state created by the normal proposal/acceptance path.  Requiring
+-- both signatures prevents either the owner or allocator minting it alone.
+template CollateralAllocation
+  with
+    allocator : Party
+    owner : Party
+    beneficiary : Party
+    assetId : Text
+    requirementId : Text
+    quantity : Decimal
+    effectiveValue : Decimal
+    location : Text
+  where
+    signatory owner, allocator
+    observer beneficiary
+
+    ensure
+      assetId /= ""
+      && requirementId /= ""
+      && quantity > 0.0
+      && effectiveValue > 0.0
+
+data AcceptResult = AcceptResult with
+  allocationCid : ContractId CollateralAllocation
+  remainingOfferCid : Optional (ContractId CollateralOffer)
+    deriving (Eq, Show)
+
+-- Contract IDs bind a recommendation to the exact state the optimiser read.
+-- If that offer has already been consumed, acceptance fails atomically.
+template ReallocationProposal
+  with
+    allocator : Party
+    owner : Party
+    offerCid : ContractId CollateralOffer
+    requirementCid : ContractId CollateralRequirement
+    assetId : Text
+    requirementId : Text
+    quantity : Decimal
+  where
+    signatory allocator
+    observer owner
+
+    ensure quantity > 0.0
+
+    choice Accept : AcceptResult
+      controller owner
+      do
+        offer <- fetch offerCid
+        requirement <- fetch requirementCid
+
+        assertMsg "Wrong offer owner" (offer.owner == owner)
+        assertMsg "Wrong offer allocator" (offer.allocator == allocator)
+        assertMsg "Wrong asset id" (offer.assetId == assetId)
+        assertMsg "Wrong requirement id"
+          (requirement.requirementId == requirementId)
+        assertMsg "Wrong requirement allocator"
+          (requirement.allocator == allocator)
+        assertMsg "Collateral owner is not the requirement obligor"
+          (requirement.obligor == owner)
+        assertMsg "Asset class is not eligible"
+          (offer.assetClass `elem` requirement.eligibleAssetClasses)
+        assertMsg "Quantity exceeds available collateral"
+          (quantity <= offer.availableQuantity)
+
+        let remainingQuantity = offer.availableQuantity - quantity
+        let effectiveValue =
+              quantity * offer.marketValue * (1.0 - offer.haircut)
+
+        archive offerCid
+        remainingOfferCid <-
+          if remainingQuantity > 0.0 then do
+            cid <- create offer with availableQuantity = remainingQuantity
+            pure (Some cid)
+          else
+            pure None
+
+        allocationCid <- create CollateralAllocation with
+          allocator
+          owner
+          beneficiary = requirement.beneficiary
+          assetId
+          requirementId
+          quantity
+          effectiveValue
+          location = offer.location
+
+        pure AcceptResult with
+          allocationCid
+          remainingOfferCid

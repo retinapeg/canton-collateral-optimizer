@@ -1,0 +1,53 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Node / frontend
+node_modules/
+.next/
+coverage/
+*.tsbuildinfo
+
+# Daml / Canton build and runtime artefacts
+.daml/
+daml-dist/
+.canton/
+log/
+logs/
+*.log
+
+# Local secrets and credentials
+.env
+.env.*
+!.env.example
+!.env.sample
+.secrets/
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.token
+credentials.json
+service-account*.json
+
+# IDE / operating system
+.DS_Store
+.vscode/
+.idea/
+
+# Local Codex project metadata and synced reference material
+/AGENTS.md
+/sources/
