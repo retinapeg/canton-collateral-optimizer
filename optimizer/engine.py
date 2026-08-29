@@ -37,6 +37,25 @@ def _required_number(item: Mapping[str, Any], field: str, kind: str) -> float:
     return number
 
 
+def _optional_number_map(
+    item: Mapping[str, Any], field: str, kind: str
+) -> dict[str, float]:
+    raw = item.get(field, {})
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"{kind}.{field} must be an object")
+    values: dict[str, float] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError(f"{kind}.{field} keys must be non-empty strings")
+        if isinstance(value, bool) or not isinstance(value, Real):
+            raise ValueError(f"{kind}.{field}.{key} must be a finite number")
+        number = float(value)
+        if not isfinite(number):
+            raise ValueError(f"{kind}.{field}.{key} must be a finite number")
+        values[key] = number
+    return values
+
+
 def _normalise_market(market: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     raw_assets = market.get("assets")
     raw_requirements = market.get("requirements")
@@ -73,6 +92,40 @@ def _normalise_market(market: Mapping[str, Any]) -> tuple[list[dict[str, Any]], 
         if available_quantity < 0:
             raise ValueError(f"{kind}.available_quantity cannot be negative")
 
+        costs_by_requirement = _optional_number_map(
+            raw, "costs_by_requirement", kind
+        )
+        if any(value < 0 for value in costs_by_requirement.values()):
+            raise ValueError(
+                f"{kind}.costs_by_requirement values cannot be negative"
+            )
+        haircuts_by_requirement = _optional_number_map(
+            raw, "haircuts_by_requirement", kind
+        )
+        if any(
+            value < 0 or value >= 1
+            for value in haircuts_by_requirement.values()
+        ):
+            raise ValueError(
+                f"{kind}.haircuts_by_requirement values must be in [0, 1)"
+            )
+        raw_eligible_requirements = raw.get("eligible_requirements")
+        if raw_eligible_requirements is None:
+            eligible_requirements = None
+        else:
+            if not isinstance(raw_eligible_requirements, Sequence) or isinstance(
+                raw_eligible_requirements, (str, bytes)
+            ):
+                raise ValueError(f"{kind}.eligible_requirements must be a list")
+            if any(
+                not isinstance(value, str) or not value.strip()
+                for value in raw_eligible_requirements
+            ):
+                raise ValueError(
+                    f"{kind}.eligible_requirements must contain non-empty strings"
+                )
+            eligible_requirements = frozenset(raw_eligible_requirements)
+
         assets.append(
             {
                 "asset_id": asset_id,
@@ -83,7 +136,9 @@ def _normalise_market(market: Mapping[str, Any]) -> tuple[list[dict[str, Any]], 
                 "opportunity_cost": opportunity_cost,
                 "available_quantity": available_quantity,
                 "location": str(raw.get("location", "")),
-                "effective_value_per_unit": market_value * (1.0 - haircut),
+                "costs_by_requirement": costs_by_requirement,
+                "haircuts_by_requirement": haircuts_by_requirement,
+                "eligible_requirements": eligible_requirements,
             }
         )
 
@@ -125,17 +180,33 @@ def _normalise_market(market: Mapping[str, Any]) -> tuple[list[dict[str, Any]], 
 
 
 def _is_eligible(asset: Mapping[str, Any], requirement: Mapping[str, Any]) -> bool:
-    """Apply the two legal eligibility rules in the demo model.
+    """Return whether an asset/requirement decision variable is permitted.
 
-    The asset class must be accepted by the requirement, and the collateral
-    owner must be the obligation's obligor.  The second rule prevents one bank's
-    inventory from silently covering another bank's obligation.
+    An explicit pair eligibility list enables the global institutional model.
+    Markets without that list retain the original owner/obligor restriction.
     """
 
-    return (
-        asset["asset_class"] in requirement["eligible_asset_classes"]
-        and asset["owner"] == requirement["obligor"]
+    if asset["asset_class"] not in requirement["eligible_asset_classes"]:
+        return False
+    eligible_requirements = asset["eligible_requirements"]
+    if eligible_requirements is not None:
+        return requirement["requirement_id"] in eligible_requirements
+    return asset["owner"] == requirement["obligor"]
+
+
+def _pair_cost(asset: Mapping[str, Any], requirement: Mapping[str, Any]) -> float:
+    return asset["costs_by_requirement"].get(
+        requirement["requirement_id"], asset["opportunity_cost"]
     )
+
+
+def _pair_effective_value(
+    asset: Mapping[str, Any], requirement: Mapping[str, Any]
+) -> float:
+    haircut = asset["haircuts_by_requirement"].get(
+        requirement["requirement_id"], asset["haircut"]
+    )
+    return asset["market_value"] * (1.0 - haircut)
 
 
 def _infeasible(message: str) -> dict[str, Any]:
@@ -209,7 +280,10 @@ def optimize_collateral(market: Mapping[str, Any]) -> dict[str, Any]:
             )
 
     objective = np.array(
-        [assets[asset_index]["opportunity_cost"] for asset_index, _ in pairs],
+        [
+            _pair_cost(assets[asset_index], requirements[requirement_index])
+            for asset_index, requirement_index in pairs
+        ],
         dtype=float,
     )
 
@@ -227,7 +301,9 @@ def optimize_collateral(market: Mapping[str, Any]) -> dict[str, Any]:
     for requirement_index, requirement_row in enumerate(requirements):
         constraint_rows.append(
             [
-                -assets[pair_asset]["effective_value_per_unit"]
+                -_pair_effective_value(
+                    assets[pair_asset], requirements[pair_requirement]
+                )
                 if pair_requirement == requirement_index
                 else 0.0
                 for pair_asset, pair_requirement in pairs
@@ -273,8 +349,10 @@ def optimize_collateral(market: Mapping[str, Any]) -> dict[str, Any]:
             continue
         asset_row = assets[asset_index]
         requirement_row = requirements[requirement_index]
-        effective_value = quantity * asset_row["effective_value_per_unit"]
-        cost = quantity * asset_row["opportunity_cost"]
+        effective_value = quantity * _pair_effective_value(
+            asset_row, requirement_row
+        )
+        cost = quantity * _pair_cost(asset_row, requirement_row)
         contributions_by_requirement[requirement_index].append(effective_value)
         emitted_costs.append(cost)
         allocations.append(

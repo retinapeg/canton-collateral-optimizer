@@ -47,6 +47,66 @@ def requirement(
 
 
 class OptimizerTests(unittest.TestCase):
+    def test_global_allocation_beats_greedy_local_choice(self) -> None:
+        asset_1 = asset(
+            "Asset1",
+            market_value=1.0,
+            available_quantity=1.0,
+            owner="InstitutionA",
+        )
+        asset_1.update(
+            {
+                "costs_by_requirement": {
+                    "InstitutionB": 1.0,
+                    "InstitutionC": 2.0,
+                },
+                "haircuts_by_requirement": {
+                    "InstitutionB": 0.0,
+                    "InstitutionC": 0.0,
+                },
+                "eligible_requirements": ["InstitutionB", "InstitutionC"],
+            }
+        )
+        asset_2 = asset(
+            "Asset2",
+            market_value=1.0,
+            available_quantity=1.0,
+            owner="InstitutionA",
+        )
+        asset_2.update(
+            {
+                "costs_by_requirement": {
+                    "InstitutionB": 1.1,
+                    "InstitutionC": 100.0,
+                },
+                "haircuts_by_requirement": {
+                    "InstitutionB": 0.0,
+                    "InstitutionC": 0.0,
+                },
+                "eligible_requirements": ["InstitutionB", "InstitutionC"],
+            }
+        )
+        market = {
+            "assets": [asset_1, asset_2],
+            "requirements": [
+                requirement("InstitutionB", 1.0, obligor="InstitutionB"),
+                requirement("InstitutionC", 1.0, obligor="InstitutionC"),
+            ],
+        }
+
+        result = optimize_collateral(market)
+
+        self.assertEqual(result["status"], "OPTIMAL")
+        self.assertAlmostEqual(result["total_cost"], 3.1, places=7)
+        allocation = {
+            (row["asset_id"], row["requirement_id"]): row["quantity"]
+            for row in result["allocations"]
+        }
+        self.assertAlmostEqual(allocation[("Asset2", "InstitutionB")], 1.0)
+        self.assertAlmostEqual(allocation[("Asset1", "InstitutionC")], 1.0)
+        self.assertNotIn(("Asset1", "InstitutionB"), allocation)
+        self.assertNotIn(("Asset2", "InstitutionC"), allocation)
+
     def test_sample_market_has_the_expected_deterministic_solution(self) -> None:
         sample_path = Path(__file__).parents[1] / "sample_data" / "market.json"
         with sample_path.open(encoding="utf-8") as handle:
