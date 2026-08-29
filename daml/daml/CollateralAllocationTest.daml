@@ -1,46 +1,109 @@
 module CollateralAllocationTest where
 
 import CollateralAllocation
+import DA.Optional (isNone)
 import Daml.Script
 
 allocationLifecycle : Script ()
 allocationLifecycle = script do
   bankA <- allocatePartyByHint (PartyIdHint "BankA")
   bankB <- allocatePartyByHint (PartyIdHint "BankB")
+  bankC <- allocatePartyByHint (PartyIdHint "BankC")
 
-  proposalCid <- submit bankA do
+  proposalForBankB <- submit bankA do
     createCmd AllocationProposal with
       source = bankA
       recipient = bankB
-      asset = "UK_GILT_2035"
+      asset = "US_TREASURY_2034"
       quantity = 30.0
       allocationReference = "optimizer-allocation-001"
 
+  proposalForBankC <- submit bankA do
+    createCmd AllocationProposal with
+      source = bankA
+      recipient = bankC
+      asset = "UK_GILT_2035"
+      quantity = 20.0
+      allocationReference = "optimizer-allocation-002"
+
   bankBProposals <- query @AllocationProposal bankB
+  bankCProposals <- query @AllocationProposal bankC
   assert (length bankBProposals == 1)
+  assert (length bankCProposals == 1)
 
-  -- Bank A signed the proposal but cannot exercise Bank B's choice.
-  submitMustFail bankA do
-    exerciseCmd proposalCid Accept
-
-  allocationCid <- submit bankB do
-    exerciseCmd proposalCid Accept
-
-  Some allocationForBankB <- queryContractId bankB allocationCid
-  Some allocationForBankA <- queryContractId bankA allocationCid
-  assert (allocationForBankB == allocationForBankA)
-  assert (allocationForBankB.quantity == 30.0)
-  assert (allocationForBankB.asset == "UK_GILT_2035")
-  assert (allocationForBankB.source == bankA)
-  assert (allocationForBankB.recipient == bankB)
+  Some proposalSeenByBankB <- queryContractId bankB proposalForBankB
+  Some proposalSeenByBankC <- queryContractId bankC proposalForBankC
+  assert (proposalSeenByBankB.source == bankA)
+  assert (proposalSeenByBankB.recipient == bankB)
+  assert (proposalSeenByBankB.asset == "US_TREASURY_2034")
+  assert (proposalSeenByBankB.quantity == 30.0)
   assert
-    (allocationForBankB.allocationReference == "optimizer-allocation-001")
+    (proposalSeenByBankB.allocationReference == "optimizer-allocation-001")
+  assert (proposalSeenByBankC.source == bankA)
+  assert (proposalSeenByBankC.recipient == bankC)
+  assert (proposalSeenByBankC.asset == "UK_GILT_2035")
+  assert (proposalSeenByBankC.quantity == 20.0)
+  assert
+    (proposalSeenByBankC.allocationReference == "optimizer-allocation-002")
+
+  bankBCannotSeeBankCProposal <-
+    queryContractId bankB proposalForBankC
+  bankCCannotSeeBankBProposal <-
+    queryContractId bankC proposalForBankB
+  assert (isNone bankBCannotSeeBankCProposal)
+  assert (isNone bankCCannotSeeBankBProposal)
+
+  -- Bank A signed both proposals but cannot exercise either recipient's choice.
+  submitMustFail bankA do
+    exerciseCmd proposalForBankB Accept
+  submitMustFail bankA do
+    exerciseCmd proposalForBankC Accept
+
+  allocationForBankB <- submit bankB do
+    exerciseCmd proposalForBankB Accept
+  allocationForBankC <- submit bankC do
+    exerciseCmd proposalForBankC Accept
+
+  proposalForBankBAfterAcceptance <-
+    queryContractId bankB proposalForBankB
+  proposalForBankCAfterAcceptance <-
+    queryContractId bankC proposalForBankC
+  assert (isNone proposalForBankBAfterAcceptance)
+  assert (isNone proposalForBankCAfterAcceptance)
+
+  Some allocationSeenByBankB <- queryContractId bankB allocationForBankB
+  Some bankBAllocationSeenByBankA <-
+    queryContractId bankA allocationForBankB
+  Some allocationSeenByBankC <- queryContractId bankC allocationForBankC
+  Some bankCAllocationSeenByBankA <-
+    queryContractId bankA allocationForBankC
+  assert (allocationSeenByBankB == bankBAllocationSeenByBankA)
+  assert (allocationSeenByBankC == bankCAllocationSeenByBankA)
+  assert (allocationSeenByBankB.source == bankA)
+  assert (allocationSeenByBankB.recipient == bankB)
+  assert (allocationSeenByBankB.asset == "US_TREASURY_2034")
+  assert (allocationSeenByBankB.quantity == 30.0)
+  assert
+    (allocationSeenByBankB.allocationReference == "optimizer-allocation-001")
+  assert (allocationSeenByBankC.source == bankA)
+  assert (allocationSeenByBankC.recipient == bankC)
+  assert (allocationSeenByBankC.asset == "UK_GILT_2035")
+  assert (allocationSeenByBankC.quantity == 20.0)
+  assert
+    (allocationSeenByBankC.allocationReference == "optimizer-allocation-002")
+
+  bankAAllocations <- query @AllocatedCollateral bankA
+  bankBAllocations <- query @AllocatedCollateral bankB
+  bankCAllocations <- query @AllocatedCollateral bankC
+  assert (length bankAAllocations == 2)
+  assert (length bankBAllocations == 1)
+  assert (length bankCAllocations == 1)
 
   submitMustFail bankA do
     createCmd AllocationProposal with
       source = bankA
       recipient = bankB
-      asset = "UK_GILT_2035"
+      asset = "US_TREASURY_2034"
       quantity = 0.0
       allocationReference = "zero-quantity"
 
@@ -48,6 +111,6 @@ allocationLifecycle = script do
     createCmd AllocationProposal with
       source = bankA
       recipient = bankB
-      asset = "UK_GILT_2035"
+      asset = "US_TREASURY_2034"
       quantity = -1.0
       allocationReference = "negative-quantity"

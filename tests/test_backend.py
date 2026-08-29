@@ -27,6 +27,39 @@ def contract(
 
 
 class BackendMappingTests(unittest.TestCase):
+    def test_submit_returns_transaction_and_uses_nested_v2_request(self) -> None:
+        client = CantonClient(user_id="receipt-test-user")
+        command = {
+            "CreateCommand": {
+                "templateId": "package:Module:Template",
+                "createArguments": {"owner": "BankA::test"},
+            }
+        }
+        response = {"transaction": {"updateId": "actual-canton-update-id"}}
+
+        with (
+            patch("backend.canton.uuid4") as uuid4,
+            patch.object(client, "_request", return_value=response) as request,
+        ):
+            uuid4.return_value.hex = "fixed-command-suffix"
+            result = client.submit(
+                "BankA::test", command, label="bank-a-create"
+            )
+
+        self.assertIs(result, response)
+        request.assert_called_once_with(
+            "POST",
+            "/v2/commands/submit-and-wait-for-transaction",
+            {
+                "commands": {
+                    "commandId": "bank-a-create-fixed-command-suffix",
+                    "userId": "receipt-test-user",
+                    "actAs": ["BankA::test"],
+                    "commands": [command],
+                }
+            },
+        )
+
     def test_party_allocation_retries_canton_startup_race(self) -> None:
         client = CantonClient(timeout=1.0)
         allocated = {"partyDetails": {"party": "BankA::namespace"}}

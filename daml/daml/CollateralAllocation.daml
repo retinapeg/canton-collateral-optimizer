@@ -16,7 +16,8 @@ template AllocatedCollateral
       && quantity > 0.0
       && allocationReference /= ""
 
--- Bank A proposes; Bank B sees the proposal and alone decides whether to accept.
+-- The source proposes; the named recipient sees the proposal and alone decides
+-- whether to accept.
 template AllocationProposal
   with
     source : Party

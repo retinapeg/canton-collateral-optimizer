@@ -153,10 +153,31 @@ class CantonClient:
             }
             if page_token:
                 payload["pageToken"] = page_token
-            response = self._request(
-                "POST", "/v2/state/active-contracts-page", payload
-            )
-            for row in response.get("activeContracts", []):
+            response: Any = None
+            try:
+                response = self._request(
+                    "POST", "/v2/state/active-contracts-page", payload
+                )
+                rows = response.get("activeContracts", [])
+            except LedgerApiError as exc:
+                # Canton 3.4 exposes the same ACS data at the non-paged route.
+                # The wallet package is pinned to SDK 3.4.10, while the
+                # collateral package uses 3.5.7. Supporting both shapes lets
+                # one local sandbox host both DARs.
+                if "HTTP 404" not in str(exc):
+                    raise
+                legacy_response = self._request(
+                    "POST",
+                    "/v2/state/active-contracts",
+                    {
+                        "filter": {"filtersByParty": {party: {}}},
+                        "verbose": True,
+                        "activeAtOffset": self.ledger_end(),
+                    },
+                )
+                rows = legacy_response or []
+
+            for row in rows:
                 entry = row.get("contractEntry", {}).get("JsActiveContract")
                 if not entry:
                     continue
@@ -171,7 +192,11 @@ class CantonClient:
                         observers=tuple(event.get("observers", [])),
                     )
                 )
-            page_token = response.get("nextPageToken")
+            page_token = (
+                response.get("nextPageToken")
+                if isinstance(response, dict)
+                else None
+            )
             if not page_token:
                 return contracts
 
@@ -190,15 +215,16 @@ class CantonClient:
         Needed for choices whose controllers are more than one party, such as a
         change that both signatories must agree to.
         """
+        commands = {
+            "commandId": f"{label}-{uuid4().hex}",
+            "userId": self.user_id,
+            "actAs": list(act_as),
+            "commands": [command],
+        }
         return self._request(
             "POST",
-            "/v2/commands/submit-and-wait",
-            {
-                "commandId": f"{label}-{uuid4().hex}",
-                "userId": self.user_id,
-                "actAs": list(act_as),
-                "commands": [command],
-            },
+            "/v2/commands/submit-and-wait-for-transaction",
+            {"commands": commands},
         )
 
     def create(

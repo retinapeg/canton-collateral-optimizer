@@ -76,8 +76,9 @@ setup = script do
   _ <- createRequirementB parties
   pure ()
 
--- The visible bilateral smart-contract demo. Bank A creates a real proposal,
--- Bank B observes and accepts it, and the resulting allocation remains active.
+-- An isolated contract fixture mirroring the Python adapter's authoritative
+-- mapping. The executable demo itself derives and submits these instructions
+-- from the optimiser result in backend/allocation_demo.py.
 privacyAndAcceptance : Script ()
 privacyAndAcceptance = script do
   debugRaw "=================================================="
@@ -86,73 +87,107 @@ privacyAndAcceptance = script do
 
   bankA <- allocatePartyByHint (PartyIdHint "BankA")
   bankB <- allocatePartyByHint (PartyIdHint "BankB")
+  bankC <- allocatePartyByHint (PartyIdHint "BankC")
 
   debugRaw ""
   debugRaw "BANK A"
-  debugRaw "Asset available: UK_GILT_2035"
-  debugRaw "Proposed allocation: 30"
+  debugRaw "Optimizer allocations: 2"
 
-  proposalCid <- submit bankA do
+  proposalForBankB <- submit bankA do
     createCmd Bilateral.AllocationProposal with
       source = bankA
       recipient = bankB
-      asset = "UK_GILT_2035"
+      asset = "US_TREASURY_2034"
       quantity = 30.0
       allocationReference = "optimizer-allocation-001"
 
-  debugRaw ""
-  debugRaw "SMART CONTRACT CREATED"
-  debugRaw "BankA -> BankB"
-  debugRaw "Asset: UK_GILT_2035"
-  debugRaw "Quantity: 30"
-  debugRaw "Reference: optimizer-allocation-001"
+  proposalForBankC <- submit bankA do
+    createCmd Bilateral.AllocationProposal with
+      source = bankA
+      recipient = bankC
+      asset = "UK_GILT_2035"
+      quantity = 20.0
+      allocationReference = "optimizer-allocation-002"
 
-  Some proposalForBankB <- queryContractId bankB proposalCid
-  assert (proposalForBankB.source == bankA)
-  assert (proposalForBankB.recipient == bankB)
-  assert (proposalForBankB.asset == "UK_GILT_2035")
-  assert (proposalForBankB.quantity == 30.0)
+  debugRaw ""
+  debugRaw "SMART CONTRACTS CREATED"
+  debugRaw "BankA -> BankB / US_TREASURY_2034 / 30"
+  debugRaw "BankA -> BankC / UK_GILT_2035 / 20"
+
+  Some proposalSeenByBankB <- queryContractId bankB proposalForBankB
+  Some proposalSeenByBankC <- queryContractId bankC proposalForBankC
+  assert (proposalSeenByBankB.source == bankA)
+  assert (proposalSeenByBankB.recipient == bankB)
+  assert (proposalSeenByBankB.asset == "US_TREASURY_2034")
+  assert (proposalSeenByBankB.quantity == 30.0)
   assert
-    (proposalForBankB.allocationReference == "optimizer-allocation-001")
+    (proposalSeenByBankB.allocationReference == "optimizer-allocation-001")
+  assert (proposalSeenByBankC.source == bankA)
+  assert (proposalSeenByBankC.recipient == bankC)
+  assert (proposalSeenByBankC.asset == "UK_GILT_2035")
+  assert (proposalSeenByBankC.quantity == 20.0)
+  assert
+    (proposalSeenByBankC.allocationReference == "optimizer-allocation-002")
 
   debugRaw ""
-  debugRaw "BANK B"
-  debugRaw "Proposal visible: YES"
+  debugRaw "BANK B AND BANK C"
+  debugRaw "Own proposal visible: YES"
 
-  -- Bank A is the proposal signatory, but only Bank B controls Accept.
+  -- Bank A is the proposal signatory, but only each recipient controls Accept.
   submitMustFail bankA do
-    exerciseCmd proposalCid Bilateral.Accept
+    exerciseCmd proposalForBankB Bilateral.Accept
+  submitMustFail bankA do
+    exerciseCmd proposalForBankC Bilateral.Accept
 
-  debugRaw "Accepting allocation..."
-  allocationCid <- submit bankB do
-    exerciseCmd proposalCid Bilateral.Accept
+  debugRaw "Recipients accepting allocations..."
+  allocationForBankB <- submit bankB do
+    exerciseCmd proposalForBankB Bilateral.Accept
+  allocationForBankC <- submit bankC do
+    exerciseCmd proposalForBankC Bilateral.Accept
 
   debugRaw ""
-  debugRaw "SMART CONTRACT ACCEPTED"
+  debugRaw "SMART CONTRACTS ACCEPTED"
 
-  proposalAfterAcceptance <- queryContractId bankB proposalCid
-  assert (isNone proposalAfterAcceptance)
+  bankBProposalAfterAcceptance <-
+    queryContractId bankB proposalForBankB
+  bankCProposalAfterAcceptance <-
+    queryContractId bankC proposalForBankC
+  assert (isNone bankBProposalAfterAcceptance)
+  assert (isNone bankCProposalAfterAcceptance)
 
-  Some allocationForBankB <- queryContractId bankB allocationCid
-  Some allocationForBankA <- queryContractId bankA allocationCid
-  assert (allocationForBankB == allocationForBankA)
-  assert (allocationForBankB.source == bankA)
-  assert (allocationForBankB.recipient == bankB)
-  assert (allocationForBankB.asset == "UK_GILT_2035")
-  assert (allocationForBankB.quantity == 30.0)
+  Some allocationSeenByBankB <- queryContractId bankB allocationForBankB
+  Some bankBAllocationSeenByBankA <-
+    queryContractId bankA allocationForBankB
+  Some allocationSeenByBankC <- queryContractId bankC allocationForBankC
+  Some bankCAllocationSeenByBankA <-
+    queryContractId bankA allocationForBankC
+  assert (allocationSeenByBankB == bankBAllocationSeenByBankA)
+  assert (allocationSeenByBankC == bankCAllocationSeenByBankA)
+  assert (allocationSeenByBankB.source == bankA)
+  assert (allocationSeenByBankB.recipient == bankB)
+  assert (allocationSeenByBankB.asset == "US_TREASURY_2034")
+  assert (allocationSeenByBankB.quantity == 30.0)
   assert
-    (allocationForBankB.allocationReference == "optimizer-allocation-001")
+    (allocationSeenByBankB.allocationReference == "optimizer-allocation-001")
+  assert (allocationSeenByBankC.source == bankA)
+  assert (allocationSeenByBankC.recipient == bankC)
+  assert (allocationSeenByBankC.asset == "UK_GILT_2035")
+  assert (allocationSeenByBankC.quantity == 20.0)
+  assert
+    (allocationSeenByBankC.allocationReference == "optimizer-allocation-002")
 
   debugRaw ""
   debugRaw "BANK B RECEIVED ALLOCATION"
-  debugRaw "30 UK_GILT_2035"
+  debugRaw "30 US_TREASURY_2034"
+  debugRaw "BANK C RECEIVED ALLOCATION"
+  debugRaw "20 UK_GILT_2035"
   debugRaw ""
   debugRaw "LEDGER RESULT"
-  debugRaw "[PASS] Proposal created by Bank A"
-  debugRaw "[PASS] Bank B observed proposal"
-  debugRaw "[PASS] Bank B accepted"
-  debugRaw "[PASS] Accepted allocation contract active"
-  debugRaw "[PASS] Bank A could not accept on Bank B's behalf"
+  debugRaw "[PASS] Two proposals created by Bank A"
+  debugRaw "[PASS] Bank B and Bank C observed their own proposals"
+  debugRaw "[PASS] Bank B and Bank C accepted their own proposals"
+  debugRaw "[PASS] Two accepted allocation contracts active"
+  debugRaw "[PASS] Bank A could not accept on either recipient's behalf"
   debugRaw ""
   debugRaw "=================================================="
 
