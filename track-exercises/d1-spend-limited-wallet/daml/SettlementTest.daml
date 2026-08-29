@@ -87,6 +87,8 @@ testSuccessfulChargeMovesLedgerAsset = script do
   Some merchantAsset <- queryContractId parties.merchant result.paymentCid
   let Some changeCid = result.changeCid
   Some ownerChange <- queryContractId parties.owner changeCid
+  Some audit <- queryContractId parties.agent result.auditCid
+  audits <- query @ChargeRecord parties.owner
 
   assert (nextMandate.spent == 30.0)
   assert (nextMandate.assetBalance == 70.0)
@@ -99,6 +101,18 @@ testSuccessfulChargeMovesLedgerAsset = script do
   assert (ownerChange.holder == parties.owner)
   assert (ownerChange.amount == 70.0)
   assert (merchantAsset.amount + ownerChange.amount == 100.0)
+  assert (length audits == 1)
+  assert (audit.merchant == parties.merchant)
+  assert (audit.amount == 30.0)
+  assert (audit.memo == "proof payment")
+  assert (audit.mandateId == "SETTLEMENT-PROOF")
+  assert (audit.previousSpent == 0.0)
+  assert (audit.newSpent == 30.0)
+  assert (audit.remainingAllowance == 50.0)
+  assert (audit.previousAssetBalance == 100.0)
+  assert (audit.newAssetBalance == 70.0)
+  assert (audit.paymentCid == result.paymentCid)
+  assert (audit.changeCid == result.changeCid)
 
 
 -- The cap is cumulative. After one valid payment, an attempt that would take
@@ -128,11 +142,13 @@ testOverCapChargeMovesNoValue = script do
   Some unchangedMandate <- queryContractId parties.agent first.mandateCid
   Some unchangedAsset <- queryContractId parties.owner currentAssetCid
   merchantAssets <- query @DemoAsset parties.merchant
+  audits <- query @ChargeRecord parties.owner
   assert (unchangedMandate.spent == 30.0)
   assert (unchangedMandate.assetBalance == 70.0)
   assert (unchangedMandate.assetCid == Some currentAssetCid)
   assert (unchangedAsset.amount == 70.0)
   assert (length merchantAssets == 1)
+  assert (length audits == 1)
 
 
 -- A non-allow-listed recipient must fail before any value or permission state
@@ -153,10 +169,12 @@ testDisallowedChargeMovesNoValue = script do
   Some unchangedMandate <- queryContractId parties.agent mandateCid
   Some unchangedAsset <- queryContractId parties.owner assetCid
   disallowedAssets <- query @DemoAsset parties.disallowed
+  audits <- query @ChargeRecord parties.owner
   assert (unchangedMandate.spent == 0.0)
   assert (unchangedMandate.assetBalance == 100.0)
   assert (unchangedAsset.amount == 100.0)
   assert (length disallowedAssets == 0)
+  assert (length audits == 0)
 
 
 -- Revocation archives the permission but not the owner's asset. Neither the
@@ -184,9 +202,11 @@ testRevokedChargeMovesNoValue = script do
   archivedMandate <- queryContractId parties.agent mandateCid
   Some unchangedAsset <- queryContractId parties.owner assetCid
   merchantAssets <- query @DemoAsset parties.merchant
+  audits <- query @ChargeRecord parties.owner
   assert (isNone archivedMandate)
   assert (unchangedAsset.amount == 100.0)
   assert (length merchantAssets == 0)
+  assert (length audits == 0)
 
 
 -- Possessing the asset contract id and being able to see it does not give the
@@ -227,6 +247,30 @@ testAgentCannotMoveValueWithoutMandate = script do
       assetBalance = 100.0
       assetCid = Some assetCid
 
+  -- The agent also cannot fabricate jointly signed operator evidence outside
+  -- Charge, even when every payload invariant is internally consistent.
+  submitMustFail parties.agent do
+    createCmd ChargeRecord with
+      owner = parties.owner
+      agent = parties.agent
+      merchant = parties.merchant
+      amount = 20.0
+      transactionTime = now
+      memo = "forged settlement audit"
+      mandateId = "FORGED-MANDATE"
+      previousSpent = 0.0
+      newSpent = 20.0
+      cap = 80.0
+      remainingAllowance = 60.0
+      expiresAt = deadline
+      allowedMerchantsAtCharge = [parties.merchant]
+      assetIssuer = parties.bank
+      assetId = "DEMO-GBP"
+      previousAssetBalance = 100.0
+      newAssetBalance = 80.0
+      paymentCid = assetCid
+      changeCid = Some assetCid
+
   Some unchangedAsset <- queryContractId parties.owner assetCid
   merchantAssetsBefore <- query @DemoAsset parties.merchant
   assert (unchangedAsset.amount == 100.0)
@@ -245,9 +289,11 @@ testAgentCannotMoveValueWithoutMandate = script do
   Some stillUnchangedMandate <- queryContractId parties.agent mandateCid
   Some stillUnchangedAsset <- queryContractId parties.owner assetCid
   merchantAssetsAfter <- query @DemoAsset parties.merchant
+  audits <- query @ChargeRecord parties.owner
   assert (stillUnchangedMandate.spent == 0.0)
   assert (stillUnchangedAsset.amount == 100.0)
   assert (length merchantAssetsAfter == 0)
+  assert (length audits == 0)
 
 
 -- This separates permission validation from settlement success. The charge is
@@ -270,8 +316,295 @@ testSettlementFailureCannotConsumePermission = script do
   Some unchangedMandate <- queryContractId parties.agent mandateCid
   Some unchangedAsset <- queryContractId parties.owner assetCid
   merchantAssets <- query @DemoAsset parties.merchant
+  audits <- query @ChargeRecord parties.owner
   assert (unchangedMandate.spent == 0.0)
   assert (unchangedMandate.assetBalance == 50.0)
   assert (unchangedMandate.assetCid == Some assetCid)
   assert (unchangedAsset.amount == 50.0)
   assert (length merchantAssets == 0)
+  assert (length audits == 0)
+
+
+-- Accept uses ledger time. At the exact expiry boundary the proposal stays
+-- active, no mandate/audit is created, and the bound asset remains untouched.
+testExpiredProposalCannotBeAccepted : Script ()
+testExpiredProposalCannotBeAccepted = script do
+  parties <- allocateTestParties
+  assetCid <- issueAsset parties 100.0
+  now <- getTime
+  let deadline = addRelTime now (hours 1)
+
+  proposalCid <- submit parties.owner do
+    createCmd MandateProposal with
+      owner = parties.owner
+      agent = parties.agent
+      mandateId = "EXPIRED-SETTLEMENT-PROPOSAL"
+      cap = 100.0
+      expiresAt = deadline
+      allowedMerchants = [parties.merchant]
+      assetIssuer = parties.bank
+      assetId = "DEMO-GBP"
+      assetAmount = 100.0
+      assetCid
+
+  setTime deadline
+  submitMustFail parties.agent do exerciseCmd proposalCid Accept
+
+  Some unchangedProposal <- queryContractId parties.owner proposalCid
+  Some unchangedAsset <- queryContractId parties.owner assetCid
+  mandates <- query @Mandate parties.owner
+  audits <- query @ChargeRecord parties.owner
+  merchantAssets <- query @DemoAsset parties.merchant
+  assert (unchangedProposal.expiresAt == deadline)
+  assert (unchangedAsset.amount == 100.0)
+  assert (length mandates == 0)
+  assert (length audits == 0)
+  assert (length merchantAssets == 0)
+
+
+-- The owner and agent must be genuinely distinct parties. Without this
+-- invariant, one party could satisfy both the proposal owner and agent roles,
+-- accept its own delegation and then exercise the supposedly agent-only
+-- Charge. Check permission and audit creation; the ownerAgent remains the
+-- legitimate asset holder, so this test does not deny its ordinary Pay right.
+testRoleAliasCannotCreatePermissionOrAudit : Script ()
+testRoleAliasCannotCreatePermissionOrAudit = script do
+  bank <- allocateParty "RoleAliasBank"
+  ownerAgent <- allocateParty "RoleAliasOwnerAgent"
+  merchant <- allocateParty "RoleAliasMerchant"
+  now <- getTime
+  let deadline = addRelTime now (hours 24)
+
+  assetCid <- submit bank do
+    createCmd DemoAsset with
+      issuer = bank
+      holder = ownerAgent
+      viewer = ownerAgent
+      assetId = "DEMO-GBP"
+      amount = 100.0
+
+  submitMustFail ownerAgent do
+    createCmd MandateProposal with
+      owner = ownerAgent
+      agent = ownerAgent
+      mandateId = "ROLE-ALIAS-PROPOSAL"
+      cap = 100.0
+      expiresAt = deadline
+      allowedMerchants = [merchant]
+      assetIssuer = bank
+      assetId = "DEMO-GBP"
+      assetAmount = 100.0
+      assetCid
+
+  submitMustFail ownerAgent do
+    createCmd Mandate with
+      owner = ownerAgent
+      agent = ownerAgent
+      mandateId = "ROLE-ALIAS-MANDATE"
+      cap = 100.0
+      spent = 0.0
+      expiresAt = deadline
+      allowedMerchants = [merchant]
+      assetIssuer = bank
+      assetId = "DEMO-GBP"
+      initialAssetAmount = 100.0
+      assetBalance = 100.0
+      assetCid = Some assetCid
+
+  submitMustFail ownerAgent do
+    createCmd ChargeRecord with
+      owner = ownerAgent
+      agent = ownerAgent
+      merchant
+      amount = 1.0
+      transactionTime = now
+      memo = "aliased audit"
+      mandateId = "ROLE-ALIAS-MANDATE"
+      previousSpent = 0.0
+      newSpent = 1.0
+      cap = 100.0
+      remainingAllowance = 99.0
+      expiresAt = deadline
+      allowedMerchantsAtCharge = [merchant]
+      assetIssuer = bank
+      assetId = "DEMO-GBP"
+      previousAssetBalance = 100.0
+      newAssetBalance = 99.0
+      paymentCid = assetCid
+      changeCid = Some assetCid
+
+  Some unchangedAsset <- queryContractId ownerAgent assetCid
+  merchantAssets <- query @DemoAsset merchant
+  audits <- query @ChargeRecord ownerAgent
+  assert (unchangedAsset.holder == ownerAgent)
+  assert (unchangedAsset.amount == 100.0)
+  assert (length merchantAssets == 0)
+  assert (length audits == 0)
+
+
+-- Literal release attack sequence for the settlement path. The sole accepted
+-- Charge moves 30 out of the issuer's original 100, leaving 70 with the owner
+-- and zero with Merchant-B. Every rejected transaction is followed by ledger
+-- queries proving rollback and the audit count remains exactly one.
+testSettlementReleaseSequenceConservesValueAndAudit : Script ()
+testSettlementReleaseSequenceConservesValueAndAudit = script do
+  bank <- allocateParty "TrustedDemoIssuer"
+  owner <- allocateParty "Owner"
+  agent <- allocateParty "Agent"
+  merchantA <- allocateParty "Merchant-A"
+  merchantB <- allocateParty "Merchant-B"
+  now <- getTime
+  let deadline = addRelTime now (hours 24)
+
+  originalAssetCid <- submit bank do
+    createCmd DemoAsset with
+      issuer = bank
+      holder = owner
+      viewer = agent
+      assetId = "DEMO-GBP"
+      amount = 100.0
+
+  proposalCid <- submit owner do
+    createCmd MandateProposal with
+      owner
+      agent
+      mandateId = "SETTLEMENT-RELEASE-DEMO"
+      cap = 100.0
+      expiresAt = deadline
+      allowedMerchants = [merchantA]
+      assetIssuer = bank
+      assetId = "DEMO-GBP"
+      assetAmount = 100.0
+      assetCid = originalAssetCid
+
+  mandateCid <- submit agent do exerciseCmd proposalCid Accept
+
+  Some initialAsset <- queryContractId owner originalAssetCid
+  initialA <- query @DemoAsset merchantA
+  initialB <- query @DemoAsset merchantB
+  initialAudits <- query @ChargeRecord owner
+  initialIssuerAssets <- query @DemoAsset bank
+  assert (initialAsset.amount == 100.0)
+  assert (length initialA == 0)
+  assert (length initialB == 0)
+  assert (length initialAudits == 0)
+  assert (length initialIssuerAssets == 1)
+
+  successful <- submit agent do
+    exerciseCmd mandateCid Charge with
+      merchant = merchantA
+      amount = 30.0
+      memo = "Merchant-A approved 30"
+
+  let Some ownerChangeCid = successful.changeCid
+  archivedInput <- queryContractId owner originalAssetCid
+  Some acceptedMandate <- queryContractId owner successful.mandateCid
+  Some owner70 <- queryContractId owner ownerChangeCid
+  Some merchantA30 <- queryContractId merchantA successful.paymentCid
+  Some acceptedAudit <- queryContractId agent successful.auditCid
+  merchantB0 <- query @DemoAsset merchantB
+  acceptedAudits <- query @ChargeRecord owner
+  acceptedIssuerAssets <- query @DemoAsset bank
+  assert (isNone archivedInput)
+  assert (acceptedMandate.spent == 30.0)
+  assert (acceptedMandate.cap - acceptedMandate.spent == 70.0)
+  assert (acceptedMandate.assetBalance == 70.0)
+  assert (acceptedMandate.assetCid == Some ownerChangeCid)
+  assert (owner70.amount == 70.0)
+  assert (merchantA30.amount == 30.0)
+  assert (length merchantB0 == 0)
+  assert (owner70.amount + merchantA30.amount == 100.0)
+  assert (length acceptedIssuerAssets == 2)
+  assert (length acceptedAudits == 1)
+  assert (acceptedAudit.merchant == merchantA)
+  assert (acceptedAudit.amount == 30.0)
+  assert (acceptedAudit.previousSpent == 0.0)
+  assert (acceptedAudit.newSpent == 30.0)
+  assert (acceptedAudit.remainingAllowance == 70.0)
+  assert (acceptedAudit.previousAssetBalance == 100.0)
+  assert (acceptedAudit.newAssetBalance == 70.0)
+  assert (acceptedAudit.paymentCid == successful.paymentCid)
+  assert (acceptedAudit.changeCid == successful.changeCid)
+
+  submitMustFail agent do
+    exerciseCmd successful.mandateCid Charge with
+      merchant = merchantA
+      amount = 80.0
+      memo = "Merchant-A cumulative cap attack"
+
+  Some capRollbackMandate <- queryContractId owner successful.mandateCid
+  Some capRollbackOwner70 <- queryContractId owner ownerChangeCid
+  Some capRollbackMerchantA30 <- queryContractId merchantA successful.paymentCid
+  capRollbackMerchantB0 <- query @DemoAsset merchantB
+  capRollbackAudits <- query @ChargeRecord owner
+  capRollbackIssuerAssets <- query @DemoAsset bank
+  assert (capRollbackMandate.spent == 30.0)
+  assert (capRollbackMandate.assetBalance == 70.0)
+  assert (capRollbackOwner70.amount == 70.0)
+  assert (capRollbackMerchantA30.amount == 30.0)
+  assert (length capRollbackMerchantB0 == 0)
+  assert (capRollbackOwner70.amount + capRollbackMerchantA30.amount == 100.0)
+  assert (length capRollbackIssuerAssets == 2)
+  assert (length capRollbackAudits == 1)
+
+  submitMustFail agent do
+    exerciseCmd successful.mandateCid Charge with
+      merchant = merchantB
+      amount = 10.0
+      memo = "Merchant-B allow-list attack"
+
+  Some allowListRollbackMandate <- queryContractId owner successful.mandateCid
+  Some allowListRollbackOwner70 <- queryContractId owner ownerChangeCid
+  Some allowListRollbackMerchantA30 <- queryContractId merchantA successful.paymentCid
+  allowListRollbackMerchantB0 <- query @DemoAsset merchantB
+  allowListRollbackAudits <- query @ChargeRecord owner
+  allowListRollbackIssuerAssets <- query @DemoAsset bank
+  assert (allowListRollbackMandate.spent == 30.0)
+  assert (allowListRollbackMandate.assetBalance == 70.0)
+  assert (allowListRollbackOwner70.amount == 70.0)
+  assert (allowListRollbackMerchantA30.amount == 30.0)
+  assert (length allowListRollbackMerchantB0 == 0)
+  assert (allowListRollbackOwner70.amount + allowListRollbackMerchantA30.amount == 100.0)
+  assert (length allowListRollbackIssuerAssets == 2)
+  assert (length allowListRollbackAudits == 1)
+
+  submit owner do exerciseCmd successful.mandateCid Revoke
+
+  revokedMandate <- queryContractId owner successful.mandateCid
+  Some revokedOwner70 <- queryContractId owner ownerChangeCid
+  Some revokedMerchantA30 <- queryContractId merchantA successful.paymentCid
+  revokedMerchantB0 <- query @DemoAsset merchantB
+  revokedAudits <- query @ChargeRecord owner
+  revokedIssuerAssets <- query @DemoAsset bank
+  assert (isNone revokedMandate)
+  assert (revokedOwner70.amount == 70.0)
+  assert (revokedMerchantA30.amount == 30.0)
+  assert (length revokedMerchantB0 == 0)
+  assert (revokedOwner70.amount + revokedMerchantA30.amount == 100.0)
+  assert (length revokedIssuerAssets == 2)
+  assert (length revokedAudits == 1)
+
+  submitMustFail agent do
+    exerciseCmd successful.mandateCid Charge with
+      merchant = merchantA
+      amount = 1.0
+      memo = "Charge against revoked mandate"
+
+  finalMandate <- queryContractId owner successful.mandateCid
+  Some finalOwner70 <- queryContractId owner ownerChangeCid
+  Some finalMerchantA30 <- queryContractId merchantA successful.paymentCid
+  finalMerchantB0 <- query @DemoAsset merchantB
+  finalAudits <- query @ChargeRecord owner
+  finalIssuerAssets <- query @DemoAsset bank
+  Some finalAudit <- queryContractId owner successful.auditCid
+  assert (isNone finalMandate)
+  assert (finalOwner70.amount == 70.0)
+  assert (finalMerchantA30.amount == 30.0)
+  assert (length finalMerchantB0 == 0)
+  assert (finalOwner70.amount + finalMerchantA30.amount == 100.0)
+  assert (length finalIssuerAssets == 2)
+  assert (length finalAudits == 1)
+  assert (finalAudit.amount == 30.0)
+  assert (finalAudit.merchant == merchantA)
+  assert (finalAudit.newSpent == 30.0)
+  assert (finalAudit.newAssetBalance == 70.0)

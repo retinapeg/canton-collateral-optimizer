@@ -69,6 +69,7 @@ data ChargeResult = ChargeResult
     mandateCid : ContractId Mandate
     paymentCid : ContractId DemoAsset
     changeCid  : Optional (ContractId DemoAsset)
+    auditCid   : ContractId ChargeRecord
   deriving (Eq, Show)
 
 
@@ -90,9 +91,11 @@ template Mandate
     assetCid           : Optional (ContractId DemoAsset)
   where
     ensure
-      cap > 0.0
+      owner /= agent
+      && cap > 0.0
       && spent >= 0.0
       && spent <= cap
+      && mandateId /= ""
       && initialAssetAmount > 0.0
       && assetBalance >= 0.0
       && spent + assetBalance == initialAssetAmount
@@ -114,6 +117,7 @@ template Mandate
         assertMsg "amount must be positive" (amount > 0.0)
         assertMsg "merchant is not allow-listed" (elem merchant allowedMerchants)
         assertMsg "charge would exceed the cap" (spent + amount <= cap)
+        assertMsg "memo must not be empty" (memo /= "")
 
         case assetCid of
           None -> abort "mandate has no remaining asset"
@@ -148,10 +152,32 @@ template Mandate
               assetBalance = newBalance
               assetCid = transfer.changeCid
 
+            auditCid <- create ChargeRecord with
+              owner
+              agent
+              merchant
+              amount
+              transactionTime = now
+              memo
+              mandateId
+              previousSpent = spent
+              newSpent = spent + amount
+              cap
+              remainingAllowance = cap - (spent + amount)
+              expiresAt
+              allowedMerchantsAtCharge = allowedMerchants
+              assetIssuer
+              assetId
+              previousAssetBalance = assetBalance
+              newAssetBalance = newBalance
+              paymentCid = transfer.paymentCid
+              changeCid = transfer.changeCid
+
             pure ChargeResult with
               mandateCid
               paymentCid = transfer.paymentCid
               changeCid = transfer.changeCid
+              auditCid
 
     -- Revocation consumes only the permission. The current DemoAsset remains
     -- owner-held and cannot be exercised by the agent directly.
@@ -168,6 +194,55 @@ template Mandate
         create this with cap = newCap
 
 
+-- Operator evidence created by the successful settlement Charge in the same
+-- transaction as value movement and permission replacement. Its payload and
+-- ledger transaction history cannot be mutated; like any Daml contract, the
+-- active record can later be archived with its stakeholder authority. Only
+-- the owner and agent are stakeholders, so the allow-list snapshot is not
+-- exposed to the merchant merely because it received the payment asset.
+template ChargeRecord
+  with
+    owner                    : Party
+    agent                    : Party
+    merchant                 : Party
+    amount                   : Decimal
+    transactionTime          : Time
+    memo                     : Text
+    mandateId                : Text
+    previousSpent            : Decimal
+    newSpent                 : Decimal
+    cap                      : Decimal
+    remainingAllowance       : Decimal
+    expiresAt                : Time
+    allowedMerchantsAtCharge : [Party]
+    assetIssuer              : Party
+    assetId                  : Text
+    previousAssetBalance     : Decimal
+    newAssetBalance          : Decimal
+    paymentCid               : ContractId DemoAsset
+    changeCid                : Optional (ContractId DemoAsset)
+  where
+    ensure
+      owner /= agent
+      && amount > 0.0
+      && memo /= ""
+      && mandateId /= ""
+      && previousSpent >= 0.0
+      && newSpent == previousSpent + amount
+      && cap > 0.0
+      && newSpent <= cap
+      && remainingAllowance == cap - newSpent
+      && transactionTime < expiresAt
+      && elem merchant allowedMerchantsAtCharge
+      && assetId /= ""
+      && previousAssetBalance > 0.0
+      && newAssetBalance == previousAssetBalance - amount
+      && newAssetBalance >= 0.0
+      && (if newAssetBalance == 0.0 then isNone changeCid else isSome changeCid)
+
+    signatory owner, agent
+
+
 template MandateProposal
   with
     owner            : Party
@@ -181,7 +256,11 @@ template MandateProposal
     assetAmount      : Decimal
     assetCid         : ContractId DemoAsset
   where
-    ensure cap > 0.0 && assetAmount > 0.0
+    ensure
+      owner /= agent
+      && cap > 0.0
+      && mandateId /= ""
+      && assetAmount > 0.0
 
     signatory owner
     observer agent
@@ -189,6 +268,8 @@ template MandateProposal
     choice Accept : ContractId Mandate
       controller agent
       do
+        now <- getTime
+        assertMsg "proposal expired" (now < expiresAt)
         asset <- fetch assetCid
         assertMsg "asset issuer does not match proposal" $
           asset.issuer == assetIssuer
