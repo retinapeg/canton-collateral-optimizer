@@ -476,3 +476,13 @@ testProposalCanBeRejected = script do
   assert (length activeProposals == 0)
   assert (length activeMandates == 0)
   pure ()
+
+
+-- Compatibility entry points retained for the authoritative baseline gate.
+-- They deliberately delegate to the stronger, granular proofs above.
+testMandate : Script ()
+testMandate = testReleaseDemoAttackSequence
+
+
+testExpiredMandate : Script ()
+testExpiredMandate = testExpiredMandateFailsAfterLedgerTimeAdvance

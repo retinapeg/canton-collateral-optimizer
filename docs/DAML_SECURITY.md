@@ -124,6 +124,12 @@ jointly archived. The historical create/archive events remain in the ledger.
 | Proposal rejection remains functional | `testProposalCanBeRejected` |
 | Exact release demo/attack sequence | `testReleaseDemoAttackSequence` |
 
+For compatibility with the authoritative baseline gate, `testMandate` delegates
+to `testReleaseDemoAttackSequence` and `testExpiredMandate` delegates to
+`testExpiredMandateFailsAfterLedgerTimeAdvance`. The compatibility names add no
+new business logic and retain the stronger granular scripts as the primary
+requirement proofs.
+
 The release-sequence test proves, in one ledger trace: cap 100; only Merchant-A
 allowed; Merchant-A 30 succeeds and leaves 70; Merchant-A 80 fails;
 Merchant-B 10 fails; owner revokes; a 1-unit charge on the revoked ID fails;

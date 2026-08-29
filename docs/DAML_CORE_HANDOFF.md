@@ -7,7 +7,7 @@
 - Daml package: `track-exercises/d1-spend-limited-wallet`
 - Package name/version: `d1-spend-limited-wallet` / `0.0.1`
 - Clean-build main package ID:
-  `53cd4f6306f6403ddcf7611a667b961a5a5155c8f9bc784fb3c0c6fe971e2d96`
+  `9972783e922a405d6630d6485e8b6d80d76e194529ab2808795f6422d99e5dc4`
 - Module: `Mandate`
 - No Python, UI, deployment, credential or unrelated business-model file was
   modified.
@@ -148,7 +148,8 @@ Final local gates from the package root:
 
 - `dpm clean`: pass;
 - `dpm build`: pass, DAR created;
-- `dpm test`: pass, all 17 named Scripts are `ok`;
+- `dpm test`: pass, all 19 named Scripts are `ok`, including compatibility
+  entry points `testMandate` and `testExpiredMandate`;
 - `dpm test --show-coverage`: pass, all 3 templates created and all 5 declared
   business choices exercised; the only 3 uncovered choices are implicit
   `Archive` choices;
