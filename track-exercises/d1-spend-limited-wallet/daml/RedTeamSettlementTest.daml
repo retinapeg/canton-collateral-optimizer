@@ -1,0 +1,598 @@
+-- Independent release-gate attacks against the canonical value-moving path.
+--
+-- Every rejected transaction is sent to Daml and surrounded by a complete
+-- owner/issuer-visible ACS snapshot. Equality proves that the active mandate,
+-- all DEMO-GBP contracts, and all settlement audit records are unchanged.
+module RedTeamSettlementTest where
+
+import DA.Optional (isNone)
+import DA.Time (addRelTime, hours)
+import Daml.Script
+import Settlement
+
+
+data Parties = Parties
+  with
+    issuer : Party
+    owner : Party
+    agent : Party
+    merchantA : Party
+    merchantB : Party
+  deriving (Eq, Show)
+
+
+data MandateSnapshot = MandateSnapshot
+  with
+    cid : ContractId Mandate
+    owner : Party
+    agent : Party
+    mandateId : Text
+    cap : Decimal
+    spent : Decimal
+    expiresAt : Time
+    allowedMerchants : [Party]
+    assetIssuer : Party
+    assetId : Text
+    initialAssetAmount : Decimal
+    assetBalance : Decimal
+    assetCid : Optional (ContractId DemoAsset)
+  deriving (Eq, Show)
+
+
+data AssetSnapshot = AssetSnapshot
+  with
+    cid : ContractId DemoAsset
+    issuer : Party
+    holder : Party
+    viewer : Party
+    assetId : Text
+    amount : Decimal
+  deriving (Eq, Show)
+
+
+data AuditSnapshot = AuditSnapshot
+  with
+    cid : ContractId ChargeRecord
+    owner : Party
+    agent : Party
+    merchant : Party
+    amount : Decimal
+    transactionTime : Time
+    memo : Text
+    mandateId : Text
+    previousSpent : Decimal
+    newSpent : Decimal
+    cap : Decimal
+    remainingAllowance : Decimal
+    expiresAt : Time
+    allowedMerchantsAtCharge : [Party]
+    assetIssuer : Party
+    assetId : Text
+    previousAssetBalance : Decimal
+    newAssetBalance : Decimal
+    paymentCid : ContractId DemoAsset
+    changeCid : Optional (ContractId DemoAsset)
+  deriving (Eq, Show)
+
+
+data LedgerSnapshot = LedgerSnapshot
+  with
+    mandates : [MandateSnapshot]
+    assets : [AssetSnapshot]
+    audits : [AuditSnapshot]
+  deriving (Eq, Show)
+
+
+toMandateSnapshot : (ContractId Mandate, Mandate) -> MandateSnapshot
+toMandateSnapshot (cid, mandate) = MandateSnapshot with
+  cid
+  owner = mandate.owner
+  agent = mandate.agent
+  mandateId = mandate.mandateId
+  cap = mandate.cap
+  spent = mandate.spent
+  expiresAt = mandate.expiresAt
+  allowedMerchants = mandate.allowedMerchants
+  assetIssuer = mandate.assetIssuer
+  assetId = mandate.assetId
+  initialAssetAmount = mandate.initialAssetAmount
+  assetBalance = mandate.assetBalance
+  assetCid = mandate.assetCid
+
+
+toAssetSnapshot : (ContractId DemoAsset, DemoAsset) -> AssetSnapshot
+toAssetSnapshot (cid, asset) = AssetSnapshot with
+  cid
+  issuer = asset.issuer
+  holder = asset.holder
+  viewer = asset.viewer
+  assetId = asset.assetId
+  amount = asset.amount
+
+
+toAuditSnapshot : (ContractId ChargeRecord, ChargeRecord) -> AuditSnapshot
+toAuditSnapshot (cid, audit) = AuditSnapshot with
+  cid
+  owner = audit.owner
+  agent = audit.agent
+  merchant = audit.merchant
+  amount = audit.amount
+  transactionTime = audit.transactionTime
+  memo = audit.memo
+  mandateId = audit.mandateId
+  previousSpent = audit.previousSpent
+  newSpent = audit.newSpent
+  cap = audit.cap
+  remainingAllowance = audit.remainingAllowance
+  expiresAt = audit.expiresAt
+  allowedMerchantsAtCharge = audit.allowedMerchantsAtCharge
+  assetIssuer = audit.assetIssuer
+  assetId = audit.assetId
+  previousAssetBalance = audit.previousAssetBalance
+  newAssetBalance = audit.newAssetBalance
+  paymentCid = audit.paymentCid
+  changeCid = audit.changeCid
+
+
+allocateParties : () -> Script Parties
+allocateParties () = do
+  issuer <- allocateParty "RedTeamSettlementIssuer"
+  owner <- allocateParty "RedTeamSettlementOwner"
+  agent <- allocateParty "RedTeamSettlementAgent"
+  merchantA <- allocateParty "RedTeamSettlementMerchantA"
+  merchantB <- allocateParty "RedTeamSettlementMerchantB"
+  pure Parties with issuer; owner; agent; merchantA; merchantB
+
+
+issueAsset : Parties -> Decimal -> Text -> Script (ContractId DemoAsset)
+issueAsset parties amount assetId =
+  submit parties.issuer do
+    createCmd DemoAsset with
+      issuer = parties.issuer
+      holder = parties.owner
+      viewer = parties.agent
+      assetId
+      amount
+
+
+activateMandate
+  : Parties
+  -> ContractId DemoAsset
+  -> Decimal
+  -> Decimal
+  -> Time
+  -> [Party]
+  -> Text
+  -> Text
+  -> Script (ContractId Mandate)
+activateMandate parties assetCid assetAmount cap expiresAt allowedMerchants mandateId assetId = do
+  proposalCid <- submit parties.owner do
+    createCmd MandateProposal with
+      owner = parties.owner
+      agent = parties.agent
+      mandateId
+      cap
+      expiresAt
+      allowedMerchants
+      assetIssuer = parties.issuer
+      assetId
+      assetAmount
+      assetCid
+  submit parties.agent do exerciseCmd proposalCid Accept
+
+
+charge
+  : Party
+  -> ContractId Mandate
+  -> Party
+  -> Decimal
+  -> Text
+  -> Script ChargeResult
+charge actor mandateCid merchant amount memo =
+  submit actor do exerciseCmd mandateCid Charge with merchant; amount; memo
+
+
+captureLedger : Parties -> Script LedgerSnapshot
+captureLedger parties = do
+  mandates <- query @Mandate parties.owner
+  assets <- query @DemoAsset parties.issuer
+  audits <- query @ChargeRecord parties.owner
+  pure LedgerSnapshot with
+    mandates = map toMandateSnapshot mandates
+    assets = map toAssetSnapshot assets
+    audits = map toAuditSnapshot audits
+
+
+assertUnchanged : Text -> LedgerSnapshot -> LedgerSnapshot -> Script ()
+assertUnchanged label before after =
+  assertMsg (label <> ": rejected transaction changed mandate, asset, or audit ACS")
+    (before == after)
+
+
+assertArchived : Text -> Optional a -> Script ()
+assertArchived label value =
+  case value of
+    None -> pure ()
+    Some _ -> abort (label <> ": expected archived contract")
+
+
+assetTotal : [AssetSnapshot] -> Decimal
+assetTotal snapshots =
+  case snapshots of
+    [] -> 0.0
+    asset :: rest -> asset.amount + assetTotal rest
+
+
+holderBalance : Party -> [AssetSnapshot] -> Decimal
+holderBalance holder snapshots =
+  case snapshots of
+    [] -> 0.0
+    asset :: rest ->
+      (if asset.holder == holder then asset.amount else 0.0)
+        + holderBalance holder rest
+
+
+setup
+  : Text
+  -> Decimal
+  -> Decimal
+  -> [Party]
+  -> Script (Parties, ContractId DemoAsset, ContractId Mandate, Time)
+setup reference assetAmount cap allowedMerchants = do
+  parties <- allocateParties ()
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  let assetId = "DEMO-GBP:" <> reference
+  assetCid <- issueAsset parties assetAmount assetId
+  mandateCid <- activateMandate
+    parties assetCid assetAmount cap expiresAt allowedMerchants reference assetId
+  pure (parties, assetCid, mandateCid, expiresAt)
+
+
+-- Attack 1: after spending 30, the exact remaining allowance and exact asset
+-- balance of 70 is accepted. Full spend returns no change CID.
+redTeamSettlement01ExactRemainingSucceeds : Script ()
+redTeamSettlement01ExactRemainingSucceeds = script do
+  parties <- allocateParties ()
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  let assetId = "DEMO-GBP:RED-SETTLEMENT-01"
+  assetCid <- issueAsset parties 100.0 assetId
+  initialCid <- activateMandate
+    parties assetCid 100.0 100.0 expiresAt [parties.merchantA]
+    "RED-SETTLEMENT-01" assetId
+  first <- charge parties.agent initialCid parties.merchantA 30.0 "first 30"
+  second <- charge parties.agent first.mandateCid parties.merchantA 70.0 "exact remaining 70"
+
+  initial <- queryContractId parties.owner initialCid
+  firstState <- queryContractId parties.owner first.mandateCid
+  Some finalMandate <- queryContractId parties.owner second.mandateCid
+  Some secondPayment <- queryContractId parties.merchantA second.paymentCid
+  snapshot <- captureLedger parties
+  assertArchived "initial mandate" initial
+  assertArchived "first successor mandate" firstState
+  assert (isNone second.changeCid)
+  assert (isNone finalMandate.assetCid)
+  assert (finalMandate.spent == 100.0)
+  assert (finalMandate.assetBalance == 0.0)
+  assert (secondPayment.amount == 70.0)
+  assert (length snapshot.audits == 2)
+  assert (assetTotal snapshot.assets == 100.0)
+  assert (holderBalance parties.owner snapshot.assets == 0.0)
+  assert (holderBalance parties.merchantA snapshot.assets == 100.0)
+  assert (holderBalance parties.merchantB snapshot.assets == 0.0)
+
+
+-- Attack 2: after spending 40, 61 is exactly one unit above the remaining 60.
+redTeamSettlement02OneAboveRemainingFailsAtomically : Script ()
+redTeamSettlement02OneAboveRemainingFailsAtomically = script do
+  parties <- allocateParties ()
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  let assetId = "DEMO-GBP:RED-SETTLEMENT-02"
+  assetCid <- issueAsset parties 100.0 assetId
+  initialCid <- activateMandate
+    parties assetCid 100.0 100.0 expiresAt [parties.merchantA]
+    "RED-SETTLEMENT-02" assetId
+  first <- charge parties.agent initialCid parties.merchantA 40.0 "first 40"
+  before <- captureLedger parties
+
+  submitMustFail parties.agent do
+    exerciseCmd first.mandateCid Charge with
+      merchant = parties.merchantA
+      amount = 61.0
+      memo = "one above remaining"
+
+  after <- captureLedger parties
+  assertUnchanged "one above remaining" before after
+
+
+-- Attack 3: several smaller successful charges cannot cumulatively exceed cap.
+redTeamSettlement03SeveralSmallChargesOverflowAtomically : Script ()
+redTeamSettlement03SeveralSmallChargesOverflowAtomically = script do
+  parties <- allocateParties ()
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  let assetId = "DEMO-GBP:RED-SETTLEMENT-03"
+  assetCid <- issueAsset parties 100.0 assetId
+  initialCid <- activateMandate
+    parties assetCid 100.0 100.0 expiresAt [parties.merchantA]
+    "RED-SETTLEMENT-03" assetId
+  first <- charge parties.agent initialCid parties.merchantA 30.0 "small charge 1"
+  second <- charge parties.agent first.mandateCid parties.merchantA 30.0 "small charge 2"
+  third <- charge parties.agent second.mandateCid parties.merchantA 30.0 "small charge 3"
+  before <- captureLedger parties
+
+  submitMustFail parties.agent do
+    exerciseCmd third.mandateCid Charge with
+      merchant = parties.merchantA
+      amount = 11.0
+      memo = "cumulative overflow"
+
+  after <- captureLedger parties
+  Some unchanged <- queryContractId parties.owner third.mandateCid
+  assert (unchanged.spent == 90.0)
+  assert (length after.audits == 3)
+  assert (assetTotal after.assets == 100.0)
+  assertUnchanged "several small charges" before after
+
+
+redTeamSettlement04ZeroAmountFailsAtomically : Script ()
+redTeamSettlement04ZeroAmountFailsAtomically = script do
+  parties <- allocateParties ()
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  let assetId = "DEMO-GBP:RED-SETTLEMENT-04"
+  assetCid <- issueAsset parties 100.0 assetId
+  mandateCid <- activateMandate
+    parties assetCid 100.0 100.0 expiresAt [parties.merchantA]
+    "RED-SETTLEMENT-04" assetId
+  before <- captureLedger parties
+  submitMustFail parties.agent do
+    exerciseCmd mandateCid Charge with
+      merchant = parties.merchantA
+      amount = 0.0
+      memo = "zero amount"
+  after <- captureLedger parties
+  assertUnchanged "zero amount" before after
+
+
+redTeamSettlement05NegativeAmountFailsAtomically : Script ()
+redTeamSettlement05NegativeAmountFailsAtomically = script do
+  parties <- allocateParties ()
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  let assetId = "DEMO-GBP:RED-SETTLEMENT-05"
+  assetCid <- issueAsset parties 100.0 assetId
+  mandateCid <- activateMandate
+    parties assetCid 100.0 100.0 expiresAt [parties.merchantA]
+    "RED-SETTLEMENT-05" assetId
+  before <- captureLedger parties
+  submitMustFail parties.agent do
+    exerciseCmd mandateCid Charge with
+      merchant = parties.merchantA
+      amount = -1.0
+      memo = "negative amount"
+  after <- captureLedger parties
+  assertUnchanged "negative amount" before after
+
+
+redTeamSettlement06DisallowedMerchantFailsAtomically : Script ()
+redTeamSettlement06DisallowedMerchantFailsAtomically = script do
+  parties <- allocateParties ()
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  let assetId = "DEMO-GBP:RED-SETTLEMENT-06"
+  assetCid <- issueAsset parties 100.0 assetId
+  mandateCid <- activateMandate
+    parties assetCid 100.0 100.0 expiresAt [parties.merchantA]
+    "RED-SETTLEMENT-06" assetId
+  before <- captureLedger parties
+  submitMustFail parties.agent do
+    exerciseCmd mandateCid Charge with
+      merchant = parties.merchantB
+      amount = 10.0
+      memo = "disallowed merchant"
+  after <- captureLedger parties
+  assertUnchanged "disallowed merchant" before after
+
+
+redTeamSettlement07OwnerCannotPretendToBeAgent : Script ()
+redTeamSettlement07OwnerCannotPretendToBeAgent = script do
+  parties <- allocateParties ()
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  let assetId = "DEMO-GBP:RED-SETTLEMENT-07"
+  assetCid <- issueAsset parties 100.0 assetId
+  mandateCid <- activateMandate
+    parties assetCid 100.0 100.0 expiresAt [parties.merchantA]
+    "RED-SETTLEMENT-07" assetId
+  before <- captureLedger parties
+  submitMustFail parties.owner do
+    exerciseCmd mandateCid Charge with
+      merchant = parties.merchantA
+      amount = 1.0
+      memo = "owner impersonation"
+  after <- captureLedger parties
+  assertUnchanged "owner impersonation" before after
+
+
+-- The merchant receives owner read visibility for this submission so the
+-- failure isolates controller authorization, not contract visibility.
+redTeamSettlement08MerchantCannotPretendToBeAgent : Script ()
+redTeamSettlement08MerchantCannotPretendToBeAgent = script do
+  parties <- allocateParties ()
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  let assetId = "DEMO-GBP:RED-SETTLEMENT-08"
+  assetCid <- issueAsset parties 100.0 assetId
+  mandateCid <- activateMandate
+    parties assetCid 100.0 100.0 expiresAt [parties.merchantA]
+    "RED-SETTLEMENT-08" assetId
+  before <- captureLedger parties
+  submitMustFail (actAs parties.merchantA <> readAs parties.owner) do
+    exerciseCmd mandateCid Charge with
+      merchant = parties.merchantA
+      amount = 1.0
+      memo = "merchant impersonation"
+  after <- captureLedger parties
+  assertUnchanged "merchant impersonation" before after
+
+
+redTeamSettlement09ValidAgentAfterExpiryFailsAtomically : Script ()
+redTeamSettlement09ValidAgentAfterExpiryFailsAtomically = script do
+  parties <- allocateParties ()
+  now <- getTime
+  let expiresAt = addRelTime now (hours 1)
+  let assetId = "DEMO-GBP:RED-SETTLEMENT-09"
+  assetCid <- issueAsset parties 100.0 assetId
+  mandateCid <- activateMandate
+    parties assetCid 100.0 100.0 expiresAt [parties.merchantA]
+    "RED-SETTLEMENT-09" assetId
+  setTime expiresAt
+  before <- captureLedger parties
+  submitMustFail parties.agent do
+    exerciseCmd mandateCid Charge with
+      merchant = parties.merchantA
+      amount = 1.0
+      memo = "post-expiry attack"
+  after <- captureLedger parties
+  assertUnchanged "post expiry" before after
+
+
+redTeamSettlement10ValidAgentAfterRevocationFailsAtomically : Script ()
+redTeamSettlement10ValidAgentAfterRevocationFailsAtomically = script do
+  parties <- allocateParties ()
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  let assetId = "DEMO-GBP:RED-SETTLEMENT-10"
+  assetCid <- issueAsset parties 100.0 assetId
+  mandateCid <- activateMandate
+    parties assetCid 100.0 100.0 expiresAt [parties.merchantA]
+    "RED-SETTLEMENT-10" assetId
+  successful <- charge parties.agent mandateCid parties.merchantA 30.0 "valid before revoke"
+  submit parties.owner do exerciseCmd successful.mandateCid Revoke
+  before <- captureLedger parties
+  submitMustFail parties.agent do
+    exerciseCmd successful.mandateCid Charge with
+      merchant = parties.merchantA
+      amount = 1.0
+      memo = "post-revocation attack"
+  after <- captureLedger parties
+  assert (length after.mandates == 0)
+  assert (length after.audits == 1)
+  assert (assetTotal after.assets == 100.0)
+  assert (holderBalance parties.owner after.assets == 70.0)
+  assert (holderBalance parties.merchantA after.assets == 30.0)
+  assertUnchanged "post revocation" before after
+
+
+redTeamSettlement11StaleCidAfterSuccessFailsAtomically : Script ()
+redTeamSettlement11StaleCidAfterSuccessFailsAtomically = script do
+  parties <- allocateParties ()
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  let assetId = "DEMO-GBP:RED-SETTLEMENT-11"
+  assetCid <- issueAsset parties 100.0 assetId
+  staleCid <- activateMandate
+    parties assetCid 100.0 100.0 expiresAt [parties.merchantA]
+    "RED-SETTLEMENT-11" assetId
+  successful <- charge parties.agent staleCid parties.merchantA 30.0 "valid charge"
+  staleBefore <- queryContractId parties.owner staleCid
+  before <- captureLedger parties
+  submitMustFail parties.agent do
+    exerciseCmd staleCid Charge with
+      merchant = parties.merchantA
+      amount = 1.0
+      memo = "stale CID replay"
+  staleAfter <- queryContractId parties.owner staleCid
+  after <- captureLedger parties
+  assertArchived "stale mandate before replay" staleBefore
+  assertArchived "stale mandate after replay" staleAfter
+  Some successor <- queryContractId parties.owner successful.mandateCid
+  assert (successor.spent == 30.0)
+  assertUnchanged "stale CID after success" before after
+
+
+redTeamSettlement12AdjustBelowSpentFailsAtomically : Script ()
+redTeamSettlement12AdjustBelowSpentFailsAtomically = script do
+  parties <- allocateParties ()
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  let assetId = "DEMO-GBP:RED-SETTLEMENT-12"
+  assetCid <- issueAsset parties 100.0 assetId
+  initialCid <- activateMandate
+    parties assetCid 100.0 100.0 expiresAt [parties.merchantA]
+    "RED-SETTLEMENT-12" assetId
+  successful <- charge parties.agent initialCid parties.merchantA 60.0 "committed spend"
+  before <- captureLedger parties
+  submitMustFail (actAs [parties.owner, parties.agent]) do
+    exerciseCmd successful.mandateCid Adjust with newCap = 59.0
+  after <- captureLedger parties
+  assertUnchanged "adjust below spent" before after
+
+
+redTeamSettlement13BilateralAdjustmentRequired : Script ()
+redTeamSettlement13BilateralAdjustmentRequired = script do
+  parties <- allocateParties ()
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  let assetId = "DEMO-GBP:RED-SETTLEMENT-13"
+  assetCid <- issueAsset parties 100.0 assetId
+  mandateCid <- activateMandate
+    parties assetCid 100.0 100.0 expiresAt [parties.merchantA]
+    "RED-SETTLEMENT-13" assetId
+  initial <- captureLedger parties
+
+  submitMustFail parties.owner do
+    exerciseCmd mandateCid Adjust with newCap = 200.0
+  afterOwner <- captureLedger parties
+  assertUnchanged "owner-only adjust" initial afterOwner
+
+  submitMustFail parties.agent do
+    exerciseCmd mandateCid Adjust with newCap = 200.0
+  afterAgent <- captureLedger parties
+  assertUnchanged "agent-only adjust" initial afterAgent
+
+  adjustedCid <- submit (actAs [parties.owner, parties.agent]) do
+    exerciseCmd mandateCid Adjust with newCap = 200.0
+  Some adjusted <- queryContractId parties.owner adjustedCid
+  oldMandate <- queryContractId parties.owner mandateCid
+  afterJoint <- captureLedger parties
+  assertArchived "pre-adjust mandate" oldMandate
+  assert (adjusted.cap == 200.0)
+  assert (adjusted.spent == 0.0)
+  assert (assetTotal afterJoint.assets == 100.0)
+  assert (length afterJoint.audits == 0)
+
+
+-- The DemoAsset remains owner-controlled rather than escrowed. If the owner
+-- moves the exact bound CID, a later agent Charge safely fails and cannot alter
+-- the stale mandate, the replacement owner action, or audit state.
+redTeamSettlementOwnerCustodyStaleBindingRollsBack : Script ()
+redTeamSettlementOwnerCustodyStaleBindingRollsBack = script do
+  parties <- allocateParties ()
+  now <- getTime
+  let expiresAt = addRelTime now (hours 24)
+  let assetId = "DEMO-GBP:RED-SETTLEMENT-CUSTODY"
+  assetCid <- issueAsset parties 100.0 assetId
+  mandateCid <- activateMandate
+    parties assetCid 100.0 100.0 expiresAt [parties.merchantA]
+    "RED-SETTLEMENT-CUSTODY" assetId
+  movedCid <- submit parties.owner do
+    exerciseCmd assetCid Give with newHolder = parties.owner
+  archivedBoundAsset <- queryContractId parties.owner assetCid
+  Some movedAsset <- queryContractId parties.owner movedCid
+  assertArchived "owner-moved bound asset" archivedBoundAsset
+  assert (movedAsset.amount == 100.0)
+  before <- captureLedger parties
+  submitMustFail parties.agent do
+    exerciseCmd mandateCid Charge with
+      merchant = parties.merchantA
+      amount = 10.0
+      memo = "bound asset was moved by owner"
+  after <- captureLedger parties
+  assert (holderBalance parties.owner after.assets == 100.0)
+  assert (holderBalance parties.merchantA after.assets == 0.0)
+  assert (length after.audits == 0)
+  assertUnchanged "owner custody stale binding" before after
