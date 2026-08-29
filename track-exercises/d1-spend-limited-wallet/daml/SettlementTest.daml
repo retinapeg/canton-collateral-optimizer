@@ -1,0 +1,277 @@
+-- Attack tests for the experimental Option A settlement proof.
+module SettlementTest where
+
+import DA.Optional (isNone)
+import DA.Time (addRelTime, hours)
+import Daml.Script
+import Settlement
+
+
+data TestParties = TestParties
+  with
+    bank       : Party
+    owner      : Party
+    agent      : Party
+    merchant   : Party
+    disallowed : Party
+  deriving (Eq, Show)
+
+
+allocateTestParties : Script TestParties
+allocateTestParties = script do
+  bank <- allocateParty "SettlementBank"
+  owner <- allocateParty "SettlementOwner"
+  agent <- allocateParty "SettlementAgent"
+  merchant <- allocateParty "AllowedMerchant"
+  disallowed <- allocateParty "DisallowedMerchant"
+  pure TestParties with bank; owner; agent; merchant; disallowed
+
+
+issueAsset : TestParties -> Decimal -> Script (ContractId DemoAsset)
+issueAsset parties amount =
+  submit parties.bank do
+    createCmd DemoAsset with
+      issuer = parties.bank
+      holder = parties.owner
+      viewer = parties.agent
+      assetId = "DEMO-GBP"
+      amount
+
+
+activateMandate
+  : TestParties
+  -> ContractId DemoAsset
+  -> Decimal
+  -> Decimal
+  -> [Party]
+  -> Script (ContractId Mandate)
+activateMandate parties assetCid assetAmount cap allowedMerchants = script do
+  now <- getTime
+  let deadline = addRelTime now (hours 24)
+  proposal <- submit parties.owner do
+    createCmd MandateProposal with
+      owner = parties.owner
+      agent = parties.agent
+      mandateId = "SETTLEMENT-PROOF"
+      cap
+      expiresAt = deadline
+      allowedMerchants
+      assetIssuer = parties.bank
+      assetId = "DEMO-GBP"
+      assetAmount
+      assetCid
+  submit parties.agent do exerciseCmd proposal Accept
+
+
+-- A valid Charge must consume both old contracts and create merchant value,
+-- owner change and the replacement permission in one successful transaction.
+testSuccessfulChargeMovesLedgerAsset : Script ()
+testSuccessfulChargeMovesLedgerAsset = script do
+  parties <- allocateTestParties
+  assetCid <- issueAsset parties 100.0
+  mandateCid <-
+    activateMandate parties assetCid 100.0 80.0 [parties.merchant]
+
+  result <- submit parties.agent do
+    exerciseCmd mandateCid Charge with
+      merchant = parties.merchant
+      amount = 30.0
+      memo = "proof payment"
+
+  oldMandate <- queryContractId parties.agent mandateCid
+  oldAsset <- queryContractId parties.owner assetCid
+  assert (isNone oldMandate)
+  assert (isNone oldAsset)
+
+  Some nextMandate <- queryContractId parties.agent result.mandateCid
+  Some merchantAsset <- queryContractId parties.merchant result.paymentCid
+  let Some changeCid = result.changeCid
+  Some ownerChange <- queryContractId parties.owner changeCid
+
+  assert (nextMandate.spent == 30.0)
+  assert (nextMandate.assetBalance == 70.0)
+  assert (nextMandate.assetCid == result.changeCid)
+  assert (merchantAsset.issuer == parties.bank)
+  assert (merchantAsset.holder == parties.merchant)
+  assert (merchantAsset.assetId == "DEMO-GBP")
+  assert (merchantAsset.amount == 30.0)
+  assert (ownerChange.issuer == parties.bank)
+  assert (ownerChange.holder == parties.owner)
+  assert (ownerChange.amount == 70.0)
+  assert (merchantAsset.amount + ownerChange.amount == 100.0)
+
+
+-- The cap is cumulative. After one valid payment, an attempt that would take
+-- total spend over the cap must leave the latest Mandate, its change asset and
+-- the merchant's already-received value exactly as they were.
+testOverCapChargeMovesNoValue : Script ()
+testOverCapChargeMovesNoValue = script do
+  parties <- allocateTestParties
+  assetCid <- issueAsset parties 100.0
+  mandateCid <-
+    activateMandate parties assetCid 100.0 80.0 [parties.merchant]
+
+  first <- submit parties.agent do
+    exerciseCmd mandateCid Charge with
+      merchant = parties.merchant
+      amount = 30.0
+      memo = "first valid payment"
+
+  let Some currentAssetCid = first.changeCid
+
+  submitMustFail parties.agent do
+    exerciseCmd first.mandateCid Charge with
+      merchant = parties.merchant
+      amount = 60.0
+      memo = "cumulative spend must exceed cap"
+
+  Some unchangedMandate <- queryContractId parties.agent first.mandateCid
+  Some unchangedAsset <- queryContractId parties.owner currentAssetCid
+  merchantAssets <- query @DemoAsset parties.merchant
+  assert (unchangedMandate.spent == 30.0)
+  assert (unchangedMandate.assetBalance == 70.0)
+  assert (unchangedMandate.assetCid == Some currentAssetCid)
+  assert (unchangedAsset.amount == 70.0)
+  assert (length merchantAssets == 1)
+
+
+-- A non-allow-listed recipient must fail before any value or permission state
+-- changes, even though the amount is otherwise valid.
+testDisallowedChargeMovesNoValue : Script ()
+testDisallowedChargeMovesNoValue = script do
+  parties <- allocateTestParties
+  assetCid <- issueAsset parties 100.0
+  mandateCid <-
+    activateMandate parties assetCid 100.0 80.0 [parties.merchant]
+
+  submitMustFail parties.agent do
+    exerciseCmd mandateCid Charge with
+      merchant = parties.disallowed
+      amount = 20.0
+      memo = "recipient must be rejected"
+
+  Some unchangedMandate <- queryContractId parties.agent mandateCid
+  Some unchangedAsset <- queryContractId parties.owner assetCid
+  disallowedAssets <- query @DemoAsset parties.disallowed
+  assert (unchangedMandate.spent == 0.0)
+  assert (unchangedMandate.assetBalance == 100.0)
+  assert (unchangedAsset.amount == 100.0)
+  assert (length disallowedAssets == 0)
+
+
+-- Revocation archives the permission but not the owner's asset. Neither the
+-- stale Charge nor a direct asset exercise by the agent can move value.
+testRevokedChargeMovesNoValue : Script ()
+testRevokedChargeMovesNoValue = script do
+  parties <- allocateTestParties
+  assetCid <- issueAsset parties 100.0
+  mandateCid <-
+    activateMandate parties assetCid 100.0 80.0 [parties.merchant]
+
+  submit parties.owner do exerciseCmd mandateCid Revoke
+
+  submitMustFail parties.agent do
+    exerciseCmd mandateCid Charge with
+      merchant = parties.merchant
+      amount = 20.0
+      memo = "revoked mandate"
+
+  submitMustFail parties.agent do
+    exerciseCmd assetCid Pay with
+      newHolder = parties.merchant
+      payAmount = 20.0
+
+  archivedMandate <- queryContractId parties.agent mandateCid
+  Some unchangedAsset <- queryContractId parties.owner assetCid
+  merchantAssets <- query @DemoAsset parties.merchant
+  assert (isNone archivedMandate)
+  assert (unchangedAsset.amount == 100.0)
+  assert (length merchantAssets == 0)
+
+
+-- Possessing the asset contract id and being able to see it does not give the
+-- agent transfer or issuance authority. Only a live Mandate Charge can combine
+-- the owner's delegated authority with the agent's controller authority.
+testAgentCannotMoveValueWithoutMandate : Script ()
+testAgentCannotMoveValueWithoutMandate = script do
+  parties <- allocateTestParties
+  assetCid <- issueAsset parties 100.0
+  now <- getTime
+  let deadline = addRelTime now (hours 24)
+
+  submitMustFail parties.agent do
+    exerciseCmd assetCid Pay with
+      newHolder = parties.merchant
+      payAmount = 20.0
+
+  submitMustFail parties.agent do
+    createCmd DemoAsset with
+      issuer = parties.bank
+      holder = parties.merchant
+      viewer = parties.merchant
+      assetId = "DEMO-GBP"
+      amount = 20.0
+
+  submitMustFail parties.agent do
+    createCmd Mandate with
+      owner = parties.owner
+      agent = parties.agent
+      mandateId = "FORGED-MANDATE"
+      cap = 80.0
+      spent = 0.0
+      expiresAt = deadline
+      allowedMerchants = [parties.merchant]
+      assetIssuer = parties.bank
+      assetId = "DEMO-GBP"
+      initialAssetAmount = 100.0
+      assetBalance = 100.0
+      assetCid = Some assetCid
+
+  Some unchangedAsset <- queryContractId parties.owner assetCid
+  merchantAssetsBefore <- query @DemoAsset parties.merchant
+  assert (unchangedAsset.amount == 100.0)
+  assert (length merchantAssetsBefore == 0)
+
+  mandateCid <-
+    activateMandate parties assetCid 100.0 80.0 [parties.merchant]
+
+  -- The owner is a Mandate signatory but is not the Charge controller.
+  submitMustFail parties.owner do
+    exerciseCmd mandateCid Charge with
+      merchant = parties.merchant
+      amount = 20.0
+      memo = "owner cannot impersonate agent"
+
+  Some stillUnchangedMandate <- queryContractId parties.agent mandateCid
+  Some stillUnchangedAsset <- queryContractId parties.owner assetCid
+  merchantAssetsAfter <- query @DemoAsset parties.merchant
+  assert (stillUnchangedMandate.spent == 0.0)
+  assert (stillUnchangedAsset.amount == 100.0)
+  assert (length merchantAssetsAfter == 0)
+
+
+-- This separates permission validation from settlement success. The charge is
+-- positive, allow-listed, unexpired and below the cap, but the nested asset
+-- choice rejects it for insufficient value. The surrounding transaction must
+-- therefore leave the Mandate unconsumed and its spent amount unchanged.
+testSettlementFailureCannotConsumePermission : Script ()
+testSettlementFailureCannotConsumePermission = script do
+  parties <- allocateTestParties
+  assetCid <- issueAsset parties 50.0
+  mandateCid <-
+    activateMandate parties assetCid 50.0 100.0 [parties.merchant]
+
+  submitMustFail parties.agent do
+    exerciseCmd mandateCid Charge with
+      merchant = parties.merchant
+      amount = 60.0
+      memo = "cap allows but asset cannot settle"
+
+  Some unchangedMandate <- queryContractId parties.agent mandateCid
+  Some unchangedAsset <- queryContractId parties.owner assetCid
+  merchantAssets <- query @DemoAsset parties.merchant
+  assert (unchangedMandate.spent == 0.0)
+  assert (unchangedMandate.assetBalance == 50.0)
+  assert (unchangedMandate.assetCid == Some assetCid)
+  assert (unchangedAsset.amount == 50.0)
+  assert (length merchantAssets == 0)

@@ -1,0 +1,220 @@
+-- Experimental Option A settlement proof.
+--
+-- This module deliberately lives beside the stable Mandate module. It proves
+-- the atomic authority shape with a small ledger-native claim before anyone
+-- attempts to connect the core demo to Canton Coin.
+module Settlement where
+
+import DA.Optional (isNone, isSome)
+
+
+data AssetTransferResult = AssetTransferResult
+  with
+    paymentCid : ContractId DemoAsset
+    changeCid  : Optional (ContractId DemoAsset)
+  deriving (Eq, Show)
+
+
+-- A deliberately small, bank-issued ledger asset/payment claim.
+--
+-- The holder can move it, but cannot mint it: every instance and every
+-- replacement remains signed by the issuer. The viewer can see the current
+-- contract but has no controller authority over it.
+template DemoAsset
+  with
+    issuer  : Party
+    holder  : Party
+    viewer  : Party
+    assetId : Text
+    amount  : Decimal
+  where
+    ensure amount > 0.0
+
+    signatory issuer
+    observer holder, viewer
+
+    choice Give : ContractId DemoAsset
+      with newHolder : Party
+      controller holder
+      do create this with holder = newHolder; viewer = newHolder
+
+    -- Pay a recipient and return change to the current holder. Because this is
+    -- one consuming choice, the input asset cannot coexist with its outputs.
+    choice Pay : AssetTransferResult
+      with
+        newHolder : Party
+        payAmount : Decimal
+      controller holder
+      do
+        assertMsg "payment amount must be positive" (payAmount > 0.0)
+        assertMsg "payment exceeds the asset" (payAmount <= amount)
+
+        paymentCid <- create this with
+          holder = newHolder
+          viewer = newHolder
+          amount = payAmount
+
+        changeCid <-
+          if payAmount == amount
+          then pure None
+          else do
+            cid <- create this with amount = amount - payAmount
+            pure (Some cid)
+
+        pure AssetTransferResult with paymentCid; changeCid
+
+
+data ChargeResult = ChargeResult
+  with
+    mandateCid : ContractId Mandate
+    paymentCid : ContractId DemoAsset
+    changeCid  : Optional (ContractId DemoAsset)
+  deriving (Eq, Show)
+
+
+-- A settlement-specific copy of the mandate model. The production Mandate
+-- module remains untouched until this spike passes every attack test.
+template Mandate
+  with
+    owner              : Party
+    agent              : Party
+    mandateId          : Text
+    cap                : Decimal
+    spent              : Decimal
+    expiresAt          : Time
+    allowedMerchants   : [Party]
+    assetIssuer        : Party
+    assetId            : Text
+    initialAssetAmount : Decimal
+    assetBalance       : Decimal
+    assetCid           : Optional (ContractId DemoAsset)
+  where
+    ensure
+      cap > 0.0
+      && spent >= 0.0
+      && spent <= cap
+      && initialAssetAmount > 0.0
+      && assetBalance >= 0.0
+      && spent + assetBalance == initialAssetAmount
+      && (if assetBalance == 0.0 then isNone assetCid else isSome assetCid)
+
+    -- The owner's signature delegates exactly the authority encoded by these
+    -- choices. The agent cannot create or alter a Mandate by itself.
+    signatory owner, agent
+
+    choice Charge : ChargeResult
+      with
+        merchant : Party
+        amount   : Decimal
+        memo     : Text
+      controller agent
+      do
+        now <- getTime
+        assertMsg "mandate expired" (now < expiresAt)
+        assertMsg "amount must be positive" (amount > 0.0)
+        assertMsg "merchant is not allow-listed" (elem merchant allowedMerchants)
+        assertMsg "charge would exceed the cap" (spent + amount <= cap)
+
+        case assetCid of
+          None -> abort "mandate has no remaining asset"
+          Some currentAssetCid -> do
+            currentAsset <- fetch currentAssetCid
+            assertMsg "mandate references the wrong issuer" $
+              currentAsset.issuer == assetIssuer
+            assertMsg "mandate references the wrong holder" $
+              currentAsset.holder == owner
+            assertMsg "mandate references the wrong agent view" $
+              currentAsset.viewer == agent
+            assertMsg "mandate references the wrong asset" $
+              currentAsset.assetId == assetId
+            assertMsg "mandate balance does not match its asset" $
+              currentAsset.amount == assetBalance
+
+            -- This nested exercise is the value movement. It is authorized by
+            -- the owner-signed Mandate and occurs in the same transaction as
+            -- permission consumption and replacement Mandate creation.
+            transfer <- exercise currentAssetCid Pay with
+              newHolder = merchant
+              payAmount = amount
+
+            let newBalance = assetBalance - amount
+            assertMsg "asset transfer returned inconsistent change" $
+              if newBalance == 0.0
+              then isNone transfer.changeCid
+              else isSome transfer.changeCid
+
+            mandateCid <- create this with
+              spent = spent + amount
+              assetBalance = newBalance
+              assetCid = transfer.changeCid
+
+            pure ChargeResult with
+              mandateCid
+              paymentCid = transfer.paymentCid
+              changeCid = transfer.changeCid
+
+    -- Revocation consumes only the permission. The current DemoAsset remains
+    -- owner-held and cannot be exercised by the agent directly.
+    choice Revoke : ()
+      controller owner
+      do pure ()
+
+    choice Adjust : ContractId Mandate
+      with newCap : Decimal
+      controller owner, agent
+      do
+        assertMsg "new cap must be positive" (newCap > 0.0)
+        assertMsg "new cap below what is already spent" (newCap >= spent)
+        create this with cap = newCap
+
+
+template MandateProposal
+  with
+    owner            : Party
+    agent            : Party
+    mandateId        : Text
+    cap              : Decimal
+    expiresAt        : Time
+    allowedMerchants : [Party]
+    assetIssuer      : Party
+    assetId          : Text
+    assetAmount      : Decimal
+    assetCid         : ContractId DemoAsset
+  where
+    ensure cap > 0.0 && assetAmount > 0.0
+
+    signatory owner
+    observer agent
+
+    choice Accept : ContractId Mandate
+      controller agent
+      do
+        asset <- fetch assetCid
+        assertMsg "asset issuer does not match proposal" $
+          asset.issuer == assetIssuer
+        assertMsg "asset holder does not match mandate owner" $
+          asset.holder == owner
+        assertMsg "asset is not visible to the mandate agent" $
+          asset.viewer == agent
+        assertMsg "asset id does not match proposal" $
+          asset.assetId == assetId
+        assertMsg "asset amount does not match proposal" $
+          asset.amount == assetAmount
+
+        create Mandate with
+          owner
+          agent
+          mandateId
+          cap
+          spent = 0.0
+          expiresAt
+          allowedMerchants
+          assetIssuer
+          assetId
+          initialAssetAmount = assetAmount
+          assetBalance = assetAmount
+          assetCid = Some assetCid
+
+    choice Reject : ()
+      controller agent
+      do pure ()
