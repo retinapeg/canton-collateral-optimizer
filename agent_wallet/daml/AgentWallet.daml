@@ -1,0 +1,351 @@
+-- A spend-limited wallet for an AI agent.  Oxford Hack track D1.
+--
+-- The answer everywhere right now is "give the agent a hot key".  This is the
+-- alternative: the agent holds no authority over money at all.  The only path
+-- from the agent to the owner's funds runs through Mandate.Charge, and that
+-- choice body checks six things before a cent moves.
+--
+-- The three lines a judge should be shown:
+--
+--   Account.Withdraw    controller owner          -- the agent cannot raid the account
+--   Mandate.Charge      controller agent          -- ...but it can spend, within limits
+--   Mandate             signatory owner, agent    -- which is why Charge holds the
+--                                                 -- owner's authority, and nothing else does
+module AgentWallet where
+
+import DA.Time
+
+
+-- | Where value lands.  A payment is evidence for both sides: the payer and the
+-- payee are both observers, so neither can quietly deny it happened.
+template Payment
+  with
+    bank   : Party
+    from   : Party
+    to     : Party
+    amount : Decimal
+    memo   : Text
+    paidAt : Time
+  where
+    ensure amount > 0.0
+    signatory bank
+    observer from, to
+
+
+-- | The owner's money.
+--
+-- `viewers` is the point of this template.  The agent is put in `viewers`, so it
+-- can READ the whole balance -- and it still cannot move a cent of it, because
+-- `Withdraw` is `controller owner`.  Seeing money and being able to spend money
+-- are different rights, and Canton lets you hand out one without the other.
+template Account
+  with
+    bank    : Party
+    owner   : Party
+    balance : Decimal
+    viewers : [Party]     -- parties the owner lets read this account
+  where
+    ensure balance >= 0.0
+    signatory bank
+    observer owner, viewers
+
+    -- ONLY the owner can move money out of the account.  An agent holding this
+    -- contract id, and knowing the exact amount, still cannot exercise this.
+    choice Withdraw : (ContractId Account, ContractId Payment)
+      with
+        payee  : Party
+        amount : Decimal
+        memo   : Text
+      controller owner
+      do
+        now <- getTime
+        assertMsg "amount must be positive" (amount > 0.0)
+        assertMsg "insufficient funds" (amount <= balance)
+        rest <- create this with balance = balance - amount
+        paid <- create Payment with
+          bank
+          from = owner
+          to = payee
+          amount
+          memo
+          paidAt = now
+        pure (rest, paid)
+
+    -- Read access is granted and withdrawn by the owner alone.
+    choice SetViewers : ContractId Account
+      with newViewers : [Party]
+      controller owner
+      do create this with viewers = newViewers
+
+
+-- | The kill switch.
+--
+-- The agent is an observer and has NO choice on this contract.  It therefore
+-- cannot exercise it, and -- the part that matters -- it cannot contend with it.
+--
+-- The starter puts revocation on the Mandate itself, which is the same contract
+-- the agent consumes on every Charge.  Under load the owner keeps losing that
+-- race, so revocation can be delayed.  Here the owner archives a contract the
+-- agent never writes to, so revocation commits first try, every time, and every
+-- in-flight and future Charge fails because its `fetch` finds nothing.
+--
+-- One switch disables every mandate this agent holds from this owner, in one
+-- transaction.
+template SpendingAuthority
+  with
+    owner : Party
+    agent : Party
+    label : Text
+  where
+    signatory owner
+    observer agent
+
+    choice RevokeAuthority : ()
+      controller owner
+      do pure ()
+
+
+-- | What a successful charge produced.  A record rather than a tuple so the
+-- JSON Ledger API returns something readable.
+data ChargeResult = ChargeResult
+  with
+    mandateCid : ContractId Mandate
+    paymentCid : ContractId Payment
+    receiptCid : ContractId ChargeReceipt
+  deriving (Eq, Show)
+
+
+-- | The permission itself: this agent may spend up to `cap`, no more than
+-- `periodLimit` per `periodLength`, only with `allowedPayees`, until `expiresAt`.
+template Mandate
+  with
+    owner         : Party
+    agent         : Party
+    accountCid    : ContractId Account            -- the ONLY funding source exposed
+    authorityCid  : ContractId SpendingAuthority  -- the kill switch
+    reference     : Text                          -- human label, e.g. "coffee-run"
+    cap           : Decimal                       -- total over the mandate's life
+    spent         : Decimal
+    periodLimit   : Optional Decimal
+    periodLength  : RelTime
+    periodStart   : Time
+    spentInPeriod : Decimal
+    allowedPayees : [Party]
+    expiresAt     : Time
+  where
+    -- Re-checked on every create, so no future choice can forget it.
+    ensure cap > 0.0
+        && spent >= 0.0
+        && spent <= cap
+        && spentInPeriod >= 0.0
+        && spentInPeriod <= spent
+        && not (null allowedPayees)
+        && convertRelTimeToMicroseconds periodLength > 0
+
+    -- Both signatories.  The owner cannot be bound without consenting, the agent
+    -- cannot be bound without consenting -- and, crucially, this is what puts the
+    -- owner's authority inside the Charge body below.
+    signatory owner, agent
+
+    -- The agent spends.  No signature from the owner at the time of spending;
+    -- that is the whole point of a mandate.
+    choice Charge : ChargeResult
+      with
+        payee  : Party
+        amount : Decimal
+        memo   : Text
+      controller agent
+      do
+        now <- getTime
+
+        -- (1) REVOCATION.  If the owner has pulled the kill switch this contract
+        -- is archived, the fetch fails, and the ledger rejects the whole
+        -- transaction.  Nothing the agent does can prevent or postpone that.
+        auth <- fetch authorityCid
+        assertMsg "spending authority does not cover this mandate"
+          (auth.owner == owner && auth.agent == agent)
+
+        -- (2) WINDOW.  Deadlines are not enforced for you.  `expiresAt` is just
+        -- a field until this line reads it.
+        assertMsg "mandate expired" (now < expiresAt)
+
+        -- (3) SANITY.  Without this a negative charge would refund the agent.
+        assertMsg "amount must be positive" (amount > 0.0)
+
+        -- (4) ALLOW-LIST.  The agent may spend, but not on whoever it likes.
+        assertMsg ("payee is not on the allow-list: " <> partyToText payee)
+          (payee `elem` allowedPayees)
+
+        -- (5) TOTAL CAP.  The line the brief is really about.
+        assertMsg "charge would exceed the total cap" (spent + amount <= cap)
+
+        -- (6) PER-PERIOD CAP.  Roll the window forward first, in microseconds,
+        -- so there is no date arithmetic to get wrong.
+        let elapsed     = convertRelTimeToMicroseconds (subTime now periodStart)
+            len         = convertRelTimeToMicroseconds periodLength
+            periods     = if elapsed <= 0 then 0 else elapsed / len
+            newStart    = addRelTime periodStart
+                            (convertMicrosecondsToRelTime (periods * len))
+            carried     = if periods > 0 then 0.0 else spentInPeriod
+            periodAfter = carried + amount
+        optional
+          (pure ())
+          (\lim ->
+            assertMsg "charge would exceed the per-period limit"
+              (periodAfter <= lim))
+          periodLimit
+
+        -- (7) THE MONEY MOVES, in this same transaction.
+        --
+        -- This is legal because a choice body holds the contract's signatories
+        -- plus the choice's controllers.  Mandate is `signatory owner, agent`,
+        -- so this body holds the OWNER's authority even though only the agent
+        -- exercised it -- and Account.Withdraw is `controller owner`.
+        --
+        -- That is delegation without a hot key: the owner's authority exists
+        -- here, behind the six checks above, and nowhere else the agent can reach.
+        (restCid, paymentCid) <- exercise accountCid Withdraw with
+          payee
+          amount
+          memo
+
+        -- (8) AUDIT.  The reason is assembled from the values the ledger
+        -- actually checked, so it cannot be spun afterwards by a backend.
+        let spentAfter = spent + amount
+            justification =
+              "mandate " <> reference
+                <> " | payee " <> partyToText payee <> " on allow-list"
+                <> " | " <> show amount <> " <= remaining " <> show (cap - spent)
+                <> " | charged " <> show now <> " before expiry " <> show expiresAt
+                <> optional
+                     ""
+                     (\lim -> " | period " <> show periodAfter <> " <= " <> show lim)
+                     periodLimit
+        receiptCid <- create ChargeReceipt with
+          owner
+          agent
+          payee
+          amount
+          memo
+          chargedAt = now
+          mandateRef = reference
+          capAtCharge = cap
+          spentBefore = spent
+          spentAfter
+          remainingAfter = cap - spentAfter
+          periodLimit
+          periodSpentAfter = periodAfter
+          expiresAt
+          allowedPayees
+          justification
+
+        -- (9) The new mandate state, carrying the account forward.
+        mandateCid <- create this with
+          accountCid = restCid
+          spent = spentAfter
+          periodStart = newStart
+          spentInPeriod = periodAfter
+
+        pure ChargeResult with mandateCid; paymentCid; receiptCid
+
+    -- Tear up this one mandate.  The agent is a signatory but cannot block a
+    -- consuming choice it does not control.
+    choice RevokeMandate : ()
+      controller owner
+      do pure ()
+
+    -- Changing the cap needs BOTH parties, because both are signatories.  An
+    -- agent cannot raise its own limit.
+    choice Adjust : ContractId Mandate
+      with newCap : Decimal
+      controller owner, agent
+      do
+        assertMsg "new cap below what is already spent" (newCap >= spent)
+        create this with cap = newCap
+
+    -- `accountCid` is a contract-id link.  If the owner spends from the same
+    -- account outside the mandate, the link goes stale and charges fail until
+    -- the owner points the mandate at the current account.  Failing closed is
+    -- the right direction, but it is a limitation, not a feature.
+    choice Rebind : ContractId Mandate
+      with newAccountCid : ContractId Account
+      controller owner
+      do
+        acct <- fetch newAccountCid
+        assertMsg "account is not owned by the mandate owner" (acct.owner == owner)
+        create this with accountCid = newAccountCid
+
+
+-- | Every charge, as its own contract.
+--
+-- No choices at all: a receipt is immutable, and archiving it needs BOTH
+-- signatures.  So the agent cannot erase a charge it made, and the owner cannot
+-- fabricate one it did not.  `justification` records which permission allowed
+-- the spend, in words, computed by the ledger.
+template ChargeReceipt
+  with
+    owner            : Party
+    agent            : Party
+    payee            : Party
+    amount           : Decimal
+    memo             : Text
+    chargedAt        : Time
+    mandateRef       : Text
+    capAtCharge      : Decimal
+    spentBefore      : Decimal
+    spentAfter       : Decimal
+    remainingAfter   : Decimal
+    periodLimit      : Optional Decimal
+    periodSpentAfter : Decimal
+    expiresAt        : Time
+    allowedPayees    : [Party]
+    justification    : Text
+  where
+    signatory owner, agent
+    observer payee
+
+
+-- | Propose and accept.  You cannot force a contract on someone who has to sign
+-- it, so the owner offers and the agent takes it up.
+template MandateProposal
+  with
+    owner         : Party
+    agent         : Party
+    accountCid    : ContractId Account
+    authorityCid  : ContractId SpendingAuthority
+    reference     : Text
+    cap           : Decimal
+    periodLimit   : Optional Decimal
+    periodLength  : RelTime
+    allowedPayees : [Party]
+    expiresAt     : Time
+  where
+    ensure cap > 0.0
+        && not (null allowedPayees)
+        && convertRelTimeToMicroseconds periodLength > 0
+    signatory owner
+    observer agent
+
+    choice Accept : ContractId Mandate
+      controller agent
+      do
+        now <- getTime
+        assertMsg "mandate has already expired" (now < expiresAt)
+        create Mandate with
+          owner
+          agent
+          accountCid
+          authorityCid
+          reference
+          cap
+          spent = 0.0
+          periodLimit
+          periodLength
+          periodStart = now
+          spentInPeriod = 0.0
+          allowedPayees
+          expiresAt
+
+    choice Reject : ()
+      controller agent
+      do pure ()

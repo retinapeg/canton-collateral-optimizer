@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 import json
 from time import monotonic, sleep
@@ -37,10 +38,16 @@ class CantonClient:
         *,
         user_id: str = "collateral-demo-backend",
         timeout: float = 20.0,
+        token_provider: Callable[[], str] | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.user_id = user_id
         self.timeout = timeout
+        # A local sandbox runs with authentication disabled, so the default is
+        # to send no credentials at all.  A shared node (LocalNet, DevNet)
+        # answers 401 without a bearer token; pass a provider for those.  It is
+        # called per request so a short-lived token can be refreshed.
+        self.token_provider = token_provider
 
     def _request(
         self,
@@ -52,6 +59,8 @@ class CantonClient:
         headers = {"Accept": "application/json"}
         if body is not None:
             headers["Content-Type"] = "application/json"
+        if self.token_provider is not None:
+            headers["Authorization"] = f"Bearer {self.token_provider()}"
         request = Request(
             f"{self.base_url}{path}",
             data=body,
@@ -73,6 +82,18 @@ class CantonClient:
         if not raw:
             return None
         return json.loads(raw)
+
+    def get(self, path: str) -> Any:
+        """Public seam for endpoints this class does not wrap.
+
+        The JSON Ledger API differs slightly between Canton versions, so a
+        caller pinned to a different SDK can reach its own endpoints without
+        this client having to know about them.
+        """
+        return self._request("GET", path)
+
+    def post(self, path: str, payload: dict[str, Any] | None = None) -> Any:
+        return self._request("POST", path, payload)
 
     def ledger_end(self) -> int:
         response = self._request("GET", "/v2/state/ledger-end")
@@ -155,13 +176,27 @@ class CantonClient:
                 return contracts
 
     def submit(self, act_as: str, command: dict[str, Any], *, label: str) -> Any:
+        return self.submit_multi(act_as=[act_as], command=command, label=label)
+
+    def submit_multi(
+        self,
+        *,
+        act_as: list[str],
+        command: dict[str, Any],
+        label: str,
+    ) -> Any:
+        """Submit acting as several parties at once.
+
+        Needed for choices whose controllers are more than one party, such as a
+        change that both signatories must agree to.
+        """
         return self._request(
             "POST",
             "/v2/commands/submit-and-wait",
             {
                 "commandId": f"{label}-{uuid4().hex}",
                 "userId": self.user_id,
-                "actAs": [act_as],
+                "actAs": list(act_as),
                 "commands": [command],
             },
         )

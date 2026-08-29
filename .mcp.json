@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "agent-wallet": {
+      "command": "/Users/arkaj/Desktop/Hackathon/Oxford-Hack/hack/bin/python",
+      "args": ["-m", "agent_wallet.mcp_server"],
+      "cwd": "/Users/arkaj/Desktop/Hackathon/Oxford-Hack/canton-collateral-optimizer",
+      "env": {
+        "AGENT_WALLET_BASE_URL": "http://localhost:7575",
+        "AGENT_WALLET_CAP": "100",
+        "AGENT_WALLET_PERIOD_LIMIT": "40",
+        "AGENT_WALLET_BALANCE": "10000",
+        "AGENT_WALLET_REFERENCE": "agent-wallet-mcp"
+      }
+    }
+  }
+}
