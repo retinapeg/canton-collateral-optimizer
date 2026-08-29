@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "capturedAt": "2026-08-29T14:41:09Z",
+  "capturedAt": "2026-08-29T15:06:02Z",
   "sanitized": true,
   "credentialsIncluded": false,
   "proofScope": "CORE_CLI_BASE_ONLY",
@@ -22,7 +22,9 @@
     "packageName": "d1-spend-limited-wallet",
     "packageVersion": "0.0.1",
     "runDemoUploadResult": "uploaded",
-    "synchronizerSelection": "participant_metadata",
+    "synchronizerSelection": "connected_synchronizers",
+    "freshParticipantUploadRuns": 2,
+    "freshParticipantPartyNamespacesDistinct": true,
     "packageStatus": "PACKAGE_STATUS_REGISTERED"
   },
   "partyRoles": [

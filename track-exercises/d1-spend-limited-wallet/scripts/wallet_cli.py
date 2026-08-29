@@ -350,13 +350,7 @@ class WalletCLI:
         os.chmod(temporary, 0o600)
         os.replace(temporary, self.state_path)
 
-    def dar_path(self) -> Path:
-        configured = os.environ.get("WALLET_DAR")
-        if configured:
-            path = Path(configured).expanduser().resolve()
-            if not path.is_file():
-                raise WalletError("DAR_NOT_FOUND", "WALLET_DAR does not identify a DAR file.")
-            return path
+    def _manifest_identity(self) -> tuple[str, str]:
         manifest = PROJECT_ROOT / "daml.yaml"
         try:
             text = manifest.read_text(encoding="utf-8")
@@ -365,18 +359,27 @@ class WalletCLI:
         name_match = re.search(r"(?m)^name:\s*([^\s#]+)\s*$", text)
         version_match = re.search(r"(?m)^version:\s*([^\s#]+)\s*$", text)
         if not name_match or not version_match:
-            raise WalletError("MANIFEST_INVALID", "daml.yaml must contain name and version fields.")
+            raise WalletError(
+                "MANIFEST_INVALID", "daml.yaml must contain name and version fields."
+            )
+        return name_match.group(1), version_match.group(1)
+
+    def dar_path(self) -> Path:
+        configured = os.environ.get("WALLET_DAR")
+        if configured:
+            path = Path(configured).expanduser().resolve()
+            if not path.is_file():
+                raise WalletError("DAR_NOT_FOUND", "WALLET_DAR does not identify a DAR file.")
+            return path
+        package_name, package_version = self._manifest_identity()
         expected = PROJECT_ROOT / ".daml" / "dist" / (
-            f"{name_match.group(1)}-{version_match.group(1)}.dar"
+            f"{package_name}-{package_version}.dar"
         )
         if expected.is_file():
             return expected.resolve()
-        candidates = sorted((PROJECT_ROOT / ".daml" / "dist").glob("*.dar"))
-        if len(candidates) == 1:
-            return candidates[0].resolve()
         raise WalletError(
             "DAR_NOT_FOUND",
-            "Run `dpm build` first; no unambiguous DAR exists under .daml/dist.",
+            "Run `dpm build` first; the exact manifest-derived DAR is absent.",
         )
 
     def inspect_dar(self) -> dict[str, str]:
@@ -417,6 +420,16 @@ class WalletCLI:
             package_id, package_name, package_version
         )):
             raise WalletError("DAR_INSPECTION_FAILED", "DAR metadata was incomplete.")
+        manifest_name, manifest_version = self._manifest_identity()
+        if package_name != manifest_name or package_version != manifest_version:
+            raise WalletError(
+                "DAR_METADATA_MISMATCH",
+                "The inspected main package name/version does not match daml.yaml.",
+                manifestPackageName=manifest_name,
+                manifestPackageVersion=manifest_version,
+                inspectedPackageName=package_name,
+                inspectedPackageVersion=package_version,
+            )
         try:
             display_path = str(dar.relative_to(PROJECT_ROOT))
         except ValueError:
@@ -445,47 +458,38 @@ class WalletCLI:
         value = response.get("packageStatus") if isinstance(response, dict) else None
         return value if isinstance(value, str) else None
 
-    def _available_synchronizer_ids(self) -> set[str]:
-        """Discover upload targets without exposing participant identifiers."""
-        page_token = ""
-        synchronizer_ids: set[str] = set()
-        for _ in range(100):
-            body: dict[str, object] = {"pageSize": 100}
-            if page_token:
-                body["pageToken"] = page_token
-            try:
-                response = self.client.request(
-                    "/v2/package-vetting/list",
-                    body=body,
-                    subject=self.client.admin_user,
-                )
-            except LedgerError as error:
-                if error.details.get("httpStatus") == 401:
-                    raise
-                return set()
-            if not isinstance(response, dict):
-                return set()
-            for group in response.get("vettedPackages", []):
-                if not isinstance(group, dict):
-                    continue
-                synchronizer_id = group.get("synchronizerId")
-                if isinstance(synchronizer_id, str) and synchronizer_id:
-                    synchronizer_ids.add(synchronizer_id)
-            next_token = response.get("nextPageToken")
-            if not isinstance(next_token, str) or not next_token:
-                return synchronizer_ids
-            page_token = next_token
-        raise WalletError(
-            "PACKAGE_METADATA_PAGINATION",
-            "Package metadata pagination did not terminate.",
+    def _connected_synchronizer_ids(self) -> set[str]:
+        """Return connected upload targets without serializing their identifiers."""
+        response = self.client.request(
+            "/v2/state/connected-synchronizers",
+            subject=self.client.admin_user,
         )
+        if not isinstance(response, dict):
+            raise WalletError(
+                "SYNCHRONIZER_RESPONSE",
+                "The participant returned invalid connected-synchronizer data.",
+            )
+        connected = response.get("connectedSynchronizers", [])
+        if not isinstance(connected, list):
+            raise WalletError(
+                "SYNCHRONIZER_RESPONSE",
+                "The participant returned invalid connected-synchronizer data.",
+            )
+        return {
+            str(item["synchronizerId"])
+            for item in connected
+            if (
+                isinstance(item, dict)
+                and isinstance(item.get("synchronizerId"), str)
+                and str(item["synchronizerId"]).strip()
+            )
+        }
 
     def _version_collisions(
         self, metadata: dict[str, str]
-    ) -> tuple[list[dict[str, str]], dict[str, object], set[str]]:
+    ) -> tuple[list[dict[str, str]], dict[str, object]]:
         page_token = ""
         matches: list[dict[str, str]] = []
-        synchronizer_ids: set[str] = set()
         for _ in range(100):
             body: dict[str, object] = {
                 "packageMetadataFilter": {
@@ -504,15 +508,12 @@ class WalletCLI:
             except LedgerError as error:
                 if error.details.get("httpStatus") == 401:
                     raise
-                return [], {"mode": "participant", "reason": error.category}, set()
+                return [], {"mode": "participant", "reason": error.category}
             if not isinstance(response, dict):
-                return [], {"mode": "participant", "reason": "unexpected_metadata_response"}, set()
+                return [], {"mode": "participant", "reason": "unexpected_metadata_response"}
             for group in response.get("vettedPackages", []):
                 if not isinstance(group, dict):
                     continue
-                synchronizer_id = group.get("synchronizerId")
-                if isinstance(synchronizer_id, str) and synchronizer_id:
-                    synchronizer_ids.add(synchronizer_id)
                 for package in group.get("packages", []):
                     if not isinstance(package, dict):
                         continue
@@ -528,9 +529,7 @@ class WalletCLI:
                             })
             next_token = response.get("nextPageToken")
             if not isinstance(next_token, str) or not next_token:
-                if not synchronizer_ids:
-                    synchronizer_ids = self._available_synchronizer_ids()
-                return matches, {"mode": "metadata", "checked": True}, synchronizer_ids
+                return matches, {"mode": "metadata", "checked": True}
             page_token = next_token
         raise WalletError("PACKAGE_METADATA_PAGINATION", "Package metadata pagination did not terminate.")
 
@@ -571,7 +570,7 @@ class WalletCLI:
                     packageVersion=metadata["packageVersion"],
                     existingPackageIds=[saved_package["packageId"]],
                 )
-            collisions, guard, synchronizer_ids = self._version_collisions(metadata)
+            collisions, guard = self._version_collisions(metadata)
             if collisions:
                 raise WalletError(
                     "PACKAGE_VERSION_COLLISION",
@@ -581,31 +580,28 @@ class WalletCLI:
                     existingPackageIds=[item["packageId"] for item in collisions],
                 )
             configured_synchronizer = os.environ.get("C8_SYNCHRONIZER_ID", "").strip()
-            if (
-                not configured_synchronizer
-                and not synchronizer_ids
-                and guard.get("mode") == "metadata"
-            ):
-                # A freshly started sandbox can answer health before its
-                # synchronizer topology is visible through package vetting.
-                # Wait briefly before the first POST so the request can carry
-                # an explicit, participant-derived target.
-                for _ in range(20):
-                    time.sleep(0.25)
-                    synchronizer_ids = self._available_synchronizer_ids()
-                    if synchronizer_ids:
-                        break
             selected_synchronizer = configured_synchronizer
-            selection_source: str | None = "configured" if configured_synchronizer else None
-            if not selected_synchronizer and len(synchronizer_ids) == 1:
-                selected_synchronizer = next(iter(synchronizer_ids))
-                selection_source = "participant_metadata"
-            upload_path = "/v2/packages"
-            if selected_synchronizer:
-                upload_path += "?" + urllib.parse.urlencode({
-                    "synchronizerId": selected_synchronizer,
-                    "vetAllPackages": "true",
-                })
+            selection_source = "configured"
+            if not selected_synchronizer:
+                connected_synchronizers: set[str] = set()
+                for attempt in range(20):
+                    connected_synchronizers = self._connected_synchronizer_ids()
+                    if connected_synchronizers:
+                        break
+                    if attempt < 19:
+                        time.sleep(0.25)
+                if len(connected_synchronizers) != 1:
+                    raise WalletError(
+                        "SYNCHRONIZER_SELECTION_REQUIRED",
+                        "Package upload requires exactly one connected synchronizer or an explicit C8_SYNCHRONIZER_ID.",
+                        connectedSynchronizerCount=len(connected_synchronizers),
+                    )
+                selected_synchronizer = next(iter(connected_synchronizers))
+                selection_source = "connected_synchronizers"
+            upload_path = "/v2/packages?" + urllib.parse.urlencode({
+                "synchronizerId": selected_synchronizer,
+                "vetAllPackages": "true",
+            })
             dar_bytes = Path(metadata["absolutePath"]).read_bytes()
             try:
                 self.client.request(
@@ -637,7 +633,7 @@ class WalletCLI:
                 "uploadResult": "uploaded",
                 "packageStatus": status,
                 "collisionGuard": guard,
-                "synchronizerSelection": selection_source or "participant_default",
+                "synchronizerSelection": selection_source,
                 **metadata,
             }
         result.pop("absolutePath", None)
@@ -695,9 +691,17 @@ class WalletCLI:
         local = [str(item["party"]) for item in self.local_parties()]
         exact = sorted(party for party in local if party == value)
         hinted = sorted(party for party in local if self._hint(party) == value)
-        candidates = exact or hinted
-        if candidates:
-            return candidates[0]
+        if exact:
+            return exact[0]
+        if len(hinted) == 1:
+            return hinted[0]
+        if len(hinted) > 1:
+            raise WalletError(
+                "AMBIGUOUS_LOCAL_PARTY",
+                "Multiple local parties share this hint; provide one exact full party ID.",
+                hint=value,
+                matchCount=len(hinted),
+            )
         if required:
             raise WalletError("LOCAL_PARTY_NOT_FOUND", "No local party matches the requested value.")
         return None

@@ -8,9 +8,20 @@ Last updated: 2026-08-29
 > `Settlement:DemoAsset`, and `Settlement:ChargeRecord`. No core-only package
 > hash or transcript in this branch is final release evidence.
 
+> **Fresh-upload correction:** the earlier `60d57f3` / `4f2f860` handoff
+> overstated the reliability of a first upload to an empty participant.
+> Package-vetting metadata can contain no matching `vettedPackages`, and an
+> unqualified `POST /v2/packages` can then fail with
+> `PACKAGE_SERVICE_CANNOT_AUTODETECT_SYNCHRONIZER`. The additive hardening
+> follow-up containing this handoff supersedes that claim: it discovers the
+> connection through `GET /v2/state/connected-synchronizers`, requires exactly
+> one non-empty ID (or an explicit `C8_SYNCHRONIZER_ID`), and always sends an
+> explicitly qualified package upload without serializing the ID.
+
 ## Scope and branch
 
-- Worktree: isolated from the main checkout
+- Worktree: `.worktrees/agent-devnet` inside the authoritative repository
+  folder, isolated from the main checkout
 - Branch: `agent/devnet`
 - Frozen producer commit: `60d57f3eb82302c979645b25c6d17ede94834145`
 - Producer parent: `1f8aba1a2dc68f60b5e74fbca8b887e225927103`
@@ -39,15 +50,34 @@ track-exercises/d1-spend-limited-wallet/scripts/test_wallet_cli.py
 track-exercises/d1-spend-limited-wallet/scripts/wallet_cli.py
 ```
 
-This handoff and schema-clarification commit is a documentation-only child of
-the frozen producer commit. The settlement adapter should cherry-pick the
-producer SHA above; it does not need this documentation commit to obtain the
-CLI implementation.
+The schema-clarification commit `4f2f86084060d94f8c0a897758271275c14b23bd`
+is a documentation-only child of the frozen producer. The current additive
+hardening follow-up is a child of `4f2f86084060d94f8c0a897758271275c14b23bd`
+and changes only integration-owned CLI, test, environment-example, and DevNet
+documentation paths. It must be applied after the frozen producer anywhere
+first-upload reliability matters; the exact immutable follow-up SHA is
+reported alongside this handoff after Git creates the commit.
+
+The additive follow-up changes exactly these seven owned files:
+
+```text
+track-exercises/d1-spend-limited-wallet/.env.example
+track-exercises/d1-spend-limited-wallet/docs/CLI_CONTRACT.md
+track-exercises/d1-spend-limited-wallet/docs/DEVNET.md
+track-exercises/d1-spend-limited-wallet/docs/DEVNET_HANDOFF.md
+track-exercises/d1-spend-limited-wallet/docs/DEVNET_RUN_TRANSCRIPT.json
+track-exercises/d1-spend-limited-wallet/scripts/test_wallet_cli.py
+track-exercises/d1-spend-limited-wallet/scripts/wallet_cli.py
+```
 
 ## Current checkpoint
 
-The core-interface transport run has passed against the no-Docker DPM sandbox. Its
-credential-safe evidence is in
+The core-interface transport run has passed against the no-Docker DPM sandbox.
+After the correction above, the exact CLI flow also passed against two wholly
+fresh sandbox participant processes started without a business DAR. In both
+runs, the connected-synchronizer endpoint returned one non-empty target, the
+ID remained in memory, the explicitly qualified raw upload was accepted, and
+the package reached `PACKAGE_STATUS_REGISTERED`. Its credential-safe evidence is in
 [`DEVNET_RUN_TRANSCRIPT.json`](DEVNET_RUN_TRANSCRIPT.json). All three gates
 passed independently:
 
@@ -148,7 +178,9 @@ outside the repository.
 Package evidence:
 
 ```text
-fresh run-demo upload: uploaded
+fresh run-demo upload process 1: uploaded
+fresh run-demo upload process 2: uploaded
+selection source: connected_synchronizers
 separate idempotency check: already_present
 status: PACKAGE_STATUS_REGISTERED
 ```
@@ -207,6 +239,13 @@ the fresh SHA before behavior was borrowed. Relevant confirmed patterns are:
 - There is no `dpm ledger upload-dar` command.
 - Exact registered package-ID presence is idempotent success
   (`already_present`).
+- A new upload discovers its target with
+  `GET /v2/state/connected-synchronizers`, unless
+  `C8_SYNCHRONIZER_ID` is explicitly configured.
+- Zero or multiple discovered IDs fail before upload; there is no bare-POST
+  fallback, and no identifier is emitted or saved.
+- Package-vetting metadata is collision evidence, not connected-synchronizer
+  discovery.
 - Different code under an already known name/version is
   `PACKAGE_VERSION_COLLISION`, including participant
   `KNOWN_PACKAGE_VERSION`.
@@ -241,7 +280,7 @@ the fresh SHA before behavior was borrowed. Relevant confirmed patterns are:
 | Main package ID | Intentionally unpinned; derive from the final combined DAR |
 | Target mode | `SANDBOX` |
 | Parties used | Owner, Agent, Merchant-A, Merchant-B; exact IDs handed off outside the commit |
-| Package upload result | Fresh run `uploaded`; separate repeat `already_present` |
+| Package upload result | Two fresh processes `uploaded`; separate repeat `already_present` |
 | Successful charge update | `COMMITTED`; exact update ID handed off outside the commit |
 | Cap rejection raw category | HTTP 400; `DAML_FAILURE`; category 9; gRPC 9; exact cap assertion |
 | Allow-list rejection raw category | HTTP 400; `DAML_FAILURE`; category 9; gRPC 9; exact allow-list assertion |

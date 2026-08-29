@@ -77,10 +77,12 @@ dpm build
 ```
 
 This compiles the Daml project and creates a DAR under `.daml/dist/`. The CLI
-reads `name` and `version` from `daml.yaml`, derives the expected DAR path, and
-runs `dpm damlc inspect-dar <dar> --json` to derive `main_package_id` plus the
-main package name/version. It rejects missing, ambiguous, or inconsistent
-artifacts.
+reads `name` and `version` from `daml.yaml`, requires exactly the resulting
+`.daml/dist/<name>-<version>.dar`, and runs
+`dpm damlc inspect-dar <dar> --json` to derive `main_package_id` plus the main
+package name/version. It rejects a missing exact artifact and rejects any DAR
+whose inspected main package name/version differs from `daml.yaml`; a stale
+sole DAR in `dist/` is never a fallback.
 
 `dpm build` does not connect to a participant and does not upload anything.
 For additional artifact integrity evidence, the verified toolchain also
@@ -110,7 +112,13 @@ python3 scripts/wallet_cli.py upload-dar
 ```
 
 This is the network gate. The command authenticates as required and sends the
-exact DAR bytes to `POST ${C8_BASE}/v2/packages` with:
+exact DAR bytes to the explicitly qualified package endpoint:
+
+```text
+POST ${C8_BASE}/v2/packages?synchronizerId=<URL-encoded-in-memory-ID>&vetAllPackages=true
+```
+
+with:
 
 ```text
 Authorization: Bearer <redacted-token>   # DevNet only
@@ -140,6 +148,7 @@ its values.
 | `C8_CLIENT_ID` | Required OAuth client ID | Unset | `SET`/`UNSET` only |
 | `C8_CLIENT_SECRET` | Required OAuth secret | Unset | `SET`/`UNSET` only |
 | `C8_REGISTRY` | Set if supplied by Cantor8 | Unset | `SET`/`UNSET` only |
+| `C8_SYNCHRONIZER_ID` | Optional explicit connected target | Optional | Never emit the value |
 
 `C8_REGISTRY` is part of the upstream environment check. This core-base demo
 records mandate charges and makes no registry request. The settlement overlay
@@ -157,7 +166,9 @@ Run the safe preflight:
 python3 scripts/wallet_cli.py health
 ```
 
-The `environment` member reports only `SET` or `UNSET` for the five variables.
+The `environment` member reports only `SET` or `UNSET` for the five required
+upstream variables. `C8_SYNCHRONIZER_ID` is an optional upload override and is
+never serialized, even as part of that status map.
 
 ## Authentication and rights
 
@@ -190,8 +201,10 @@ not necessarily hosted by this participant.
 1. Call `GET /v2/parties`.
 2. Discard every party unless `isLocal` is exactly `true`.
 3. Match an existing local party by its hint before attempting allocation.
-4. Allocate only a missing hint.
-5. Verify `CanActAs` for every party used in `actAs`.
+4. If more than one local party has that hint, fail with
+   `AMBIGUOUS_LOCAL_PARTY`; never pick the lexicographically first match.
+5. Allocate only a genuinely missing hint.
+6. Verify `CanActAs` for every party used in `actAs`.
 
 The demo hints are:
 
@@ -214,8 +227,10 @@ version.
 
 The upload sequence is:
 
-1. Derive one DAR path from the current `daml.yaml`.
-2. Inspect that exact DAR and derive its main package ID.
+1. Derive the exact `<name>-<version>.dar` path from the current `daml.yaml`;
+   do not fall back to another sole artifact in `dist/`.
+2. Inspect that exact DAR, require its main package name/version to match the
+   manifest, and derive its main package ID.
 3. Read the participant's package IDs.
 4. If the exact package ID exists and is registered, return `already_present`
    and do not POST.
@@ -224,14 +239,25 @@ The upload sequence is:
    `PACKAGE_VERSION_COLLISION`.
 6. If that optional metadata surface is unavailable, retain that fact in the
    result and allow the participant's upload collision check to decide.
-7. When the participant exposes one unambiguous synchronizer in package-vetting
-   metadata, pass that identifier with `vetAllPackages=true` to the upload
-   endpoint. This avoids an unsafe participant auto-detection failure without
-   logging the identifier.
-8. Otherwise POST the raw DAR bytes once and let the participant choose or
-   reject the target authoritatively.
-9. Re-read package status/listing and require the exact package ID to be
+7. Use an explicit non-empty `C8_SYNCHRONIZER_ID` if configured. Otherwise call
+   `GET /v2/state/connected-synchronizers` with no party filter. Retry an empty
+   list only for a short bounded interval.
+8. Require exactly one non-empty connected ID. Zero after the retry or multiple
+   IDs is `SYNCHRONIZER_SELECTION_REQUIRED`; do not load the DAR payload for
+   upload or POST it.
+9. Retain the selected ID in memory only and POST the raw DAR bytes with both
+   `synchronizerId=<URL-encoded-ID>` and `vetAllPackages=true`. Never attempt a
+   bare package POST. Package-vetting metadata is for collision detection, not
+   connectivity discovery.
+10. Re-read package status/listing and require the exact package ID to be
    `PACKAGE_STATUS_REGISTERED` before recording `uploaded`.
+
+Digital Asset's
+[`GET /v2/state/connected-synchronizers` OpenAPI](https://docs.digitalasset.com/build/3.5/reference/json-api/openapi.html)
+defines the participant connection-state route, and the official
+[external-party onboarding quickstart](https://docs.digitalasset.com/build/3.5/quickstart/operate/how-to-onboard-external-parties-in-quickstart.html)
+uses it to derive a synchronizer ID. Package-vetting remains a separate
+topology/metadata surface.
 
 The participant may reject different rebuilt code that reuses a known package
 name/version. A `KNOWN_PACKAGE_VERSION` response is terminal for that artifact:
@@ -291,7 +317,7 @@ In a second terminal, from the project directory:
 
 ```sh
 export C8_BASE=http://localhost:7575
-unset C8_IDP C8_CLIENT_ID C8_CLIENT_SECRET C8_REGISTRY
+unset C8_IDP C8_CLIENT_ID C8_CLIENT_SECRET C8_REGISTRY C8_SYNCHRONIZER_ID
 ./scripts/demo_devnet.sh
 ```
 

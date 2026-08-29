@@ -113,9 +113,11 @@ The CLI's own representative categories are:
 | `AUTH_UNREACHABLE`, `LEDGER_UNREACHABLE` | Identity provider or Ledger API cannot be reached. |
 | `AUTHENTICATION` | HTTP 401: the token is missing, expired, or invalid. |
 | `AUTHORIZATION` | HTTP 403: the token identity lacks access or party rights. |
-| `NON_LOCAL_PARTY`, `LOCAL_PARTY_NOT_FOUND` | A requested submitter is not a usable local party. |
+| `NON_LOCAL_PARTY`, `LOCAL_PARTY_NOT_FOUND`, `AMBIGUOUS_LOCAL_PARTY` | A requested submitter is not a usable, uniquely resolved local party. |
 | `CAN_ACT_AS_MISSING` | The configured ledger user does not have `CanActAs`. |
-| `DAR_NOT_FOUND`, `DAR_INSPECTION_FAILED`, `DPM_NOT_FOUND` | The current business DAR cannot be located or inspected. |
+| `MANIFEST_NOT_FOUND`, `MANIFEST_INVALID` | `daml.yaml` is missing or does not expose one package name/version. |
+| `DAR_NOT_FOUND`, `DAR_INSPECTION_FAILED`, `DAR_METADATA_MISMATCH`, `DPM_NOT_FOUND` | The exact current business DAR cannot be located, inspected, or matched to `daml.yaml`. |
+| `SYNCHRONIZER_RESPONSE`, `SYNCHRONIZER_SELECTION_REQUIRED` | A safe package-upload target cannot be derived unambiguously. |
 | `PACKAGE_VERSION_COLLISION` | The same package name/version maps to different code. |
 | `PACKAGE_NOT_REGISTERED`, `PACKAGE_UPLOAD_UNVERIFIED` | Participant package registration/upload did not verify. |
 | `*_NOT_FOUND`, `DEMO_NOT_SETUP` | Required saved or active demo state cannot be located. |
@@ -239,11 +241,15 @@ the exact parties.
 
 ### `upload-dar`
 
-The command derives the DAR from `name` and `version` in `daml.yaml`, then runs
+The command requires the exact `.daml/dist/<name>-<version>.dar` derived from
+`name` and `version` in `daml.yaml`, then runs
 `dpm damlc inspect-dar <dar> --json` and reads `main_package_id` plus the main
-package's name/version. It does not assume a fixed filename or reuse a stale
-package ID. The Python implementation has no third-party library dependency;
-the Daml toolchain remains required for DAR inspection.
+package's name/version. Inspection must report the same name/version as the
+manifest. A differently named sole DAR is never accepted as a fallback. A
+`WALLET_DAR` override may point to a build in another isolated worktree, but
+its inspected main package name/version must still match the current manifest.
+The Python implementation has no third-party library dependency; the Daml
+toolchain remains required for DAR inspection.
 
 Minimum `result` evidence:
 
@@ -254,6 +260,7 @@ Minimum `result` evidence:
   "packageVersion": "0.0.1",
   "packageId": "<64-hex-main-package-id>",
   "uploadResult": "uploaded",
+  "synchronizerSelection": "connected_synchronizers",
   "packageStatus": "PACKAGE_STATUS_REGISTERED"
 }
 ```
@@ -262,15 +269,30 @@ Minimum `result` evidence:
 `POST /v2/packages`, or `already_present` when `GET /v2/packages` already
 contains the exact main package ID. Both are successful, idempotent outcomes,
 and both require `PACKAGE_STATUS_REGISTERED` from the participant.
+`synchronizerSelection` is present for `uploaded`; `already_present` performs
+no upload-target selection and therefore omits that member.
 
 Before uploading an absent package ID, the client asks the participant's
 package-vetting metadata for a different ID with the same package name/version.
-If one exists, it stops with `PACKAGE_VERSION_COLLISION`. If that metadata API
-is unavailable, the participant's upload decision is still authoritative. A
-participant `KNOWN_PACKAGE_VERSION` or `KNOWN_DAR_VERSION` response is
-converted to `PACKAGE_VERSION_COLLISION` while retaining the safe raw fields.
-The client never retries different code under the same name/version and never
-edits `daml.yaml`.
+That endpoint is collision metadata only; it is never used to discover where
+the participant is connected. If a collision exists, the client stops with
+`PACKAGE_VERSION_COLLISION`. If the metadata API is unavailable, the
+participant's upload decision is still authoritative. A participant
+`KNOWN_PACKAGE_VERSION` or `KNOWN_DAR_VERSION` response is converted to
+`PACKAGE_VERSION_COLLISION` while retaining the safe raw fields. The client
+never retries different code under the same name/version and never edits
+`daml.yaml`.
+
+For a new upload, an explicit non-empty `C8_SYNCHRONIZER_ID` wins. Otherwise
+the client calls `GET /v2/state/connected-synchronizers` with no party filter,
+retries an empty list for a short bounded interval, and requires exactly one
+non-empty `synchronizerId`. Zero or multiple connected IDs fail closed before
+the DAR payload is loaded for upload or posted. The request is always
+explicitly qualified as
+`POST /v2/packages?synchronizerId=<URL-encoded-in-memory-ID>&vetAllPackages=true`;
+there is no unqualified-upload fallback. The identifier is retained in memory
+only. Result JSON exposes `synchronizerSelection` as either `configured` or
+`connected_synchronizers`, never the identifier itself.
 
 ### `list-parties`
 
@@ -296,8 +318,11 @@ Non-local parties must not be returned as candidates for submission.
 
 Finds or allocates the four demo parties by hint: `Owner`, `Agent`,
 `Merchant-A`, and `Merchant-B`. It searches local parties first and never
-allocates a duplicate merely because the command has run before. Before saving
-the setup, it verifies `CanActAs` for every party that the CLI will submit as.
+allocates a duplicate merely because the command has run before. If multiple
+local parties share a hint, resolution fails with `AMBIGUOUS_LOCAL_PARTY`;
+an operator may retry with one exact full party ID where the command accepts a
+party argument. Before saving the setup, it verifies `CanActAs` for every
+party that the CLI will submit as.
 
 The result contains a `parties` object keyed by `owner`, `agent`, `merchantA`,
 and `merchantB`, a `partyActions` object whose values are `reused` or
