@@ -65,6 +65,7 @@ class Simulation:
         self.spent = Decimal("0")
         self.breaches: list[str] = []
         self.reference = f"ops-{int(time.time())}"
+        self._last_was_period_refusal = False
 
     # -- output --------------------------------------------------------------
 
@@ -153,6 +154,7 @@ class Simulation:
             reason = exc.reason
             key = _classify(reason)
             self.refused_by[key] = self.refused_by.get(key, 0) + 1
+            self._last_was_period_refusal = (key == "would exceed the period limit")
             self.event(False, job.vendor.label, job.amount, job.reason, reason[:44])
             if job.kind == "incident" and key == "unknown":
                 self.breaches.append(f"unexpected refusal: {reason}")
@@ -192,6 +194,7 @@ class Simulation:
         runaway_at = self.args.jobs // 2
         revoke_at = int(self.args.jobs * 0.85)
 
+
         for index, job in enumerate(jobs):
             if index == phish_at:
                 self.incident_phishing(mandate, agent, parties)
@@ -204,6 +207,28 @@ class Simulation:
             mandate = self.attempt(
                 mandate, agent, parties[job.vendor.hint], job
             )
+
+            # Smart agent: if we just hit the period limit, read the
+            # mandate's actual period_start from the ledger and sleep
+            # until the window rolls over.
+            if self._last_was_period_refusal:
+                current = self.refresh(mandate, agent)
+                if current.period_start and current.period_length:
+                    from datetime import datetime, timezone
+                    now = datetime.now(timezone.utc)
+                    window_end = current.period_start + current.period_length
+                    wait_seconds = (window_end - now).total_seconds()
+                    # Add a small buffer so we land after the rollover
+                    wait_seconds = max(wait_seconds + 1.0, 0)
+                    if wait_seconds > 0:
+                        real_wait = wait_seconds / max(self.args.speed, 0.01)
+                        print(
+                            f"\n  {self.c(DIM, f'  Period limit reached. Waiting {wait_seconds:.0f}s for the window to reset...')}\n"
+                        )
+                        time.sleep(real_wait)
+                        mandate = self.refresh(mandate, agent)
+                self._last_was_period_refusal = False
+
             self.pause(self.args.gap)
 
         return self.report(mandate, owner, authority)
@@ -323,11 +348,9 @@ class Simulation:
             print(
                 self.c(
                     DIM,
-                    "  Note: this agent never backs off. A well-built one would read\n"
-                    "  wallet_status and wait for the window to reset instead of\n"
-                    "  retrying into a wall. It is deliberately badly behaved here,\n"
-                    "  because the claim is that the wallet holds even when the agent\n"
-                    "  does not cooperate.",
+                    "  Note: the agent waits for the period window to reset when it\n"
+                    "  hits the limit, instead of retrying into a wall. Period-limit\n"
+                    "  refusals above are the first attempt that discovered the limit.",
                 )
             )
         print(f"  Statement: http://localhost:{self.args.watch_port}/?ref={self.reference}")
