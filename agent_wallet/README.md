@@ -287,6 +287,8 @@ python -m agent_wallet.mcp_server        # JSON-RPC 2.0 over stdio, standard lib
 
 Tools: `wallet_status`, `list_payees`, `pay`, `statement`. A `.mcp.json` at the project root
 already points Claude Code, Antigravity IDE or Cursor at it (restart the client to pick it up).
+It starts the server with the repository-local `.venv/bin/python` from the repository root, so
+create that environment first (see the quick start in the root README).
 
 **The server never checks a limit.** Ask it to overspend and it submits anyway:
 
@@ -310,12 +312,14 @@ nothing to reach.
 
 ## 9. Running it
 
-Setup, including what is and is not installed on this machine, is in [`AGENTS.md`](AGENTS.md).
+The hackathon machine's setup is recorded in [`AGENTS.md`](AGENTS.md). The commands below use
+the legacy `daml` assistant with SDK 3.4.10, as that machine did; `./demo.sh` at the repository
+root instead builds and runs the wallet with DPM.
 
 ```bash
-cd canton-collateral-optimizer
-source ../hack/bin/activate
-export JAVA_HOME=/usr/local/opt/openjdk@21
+# from the repository root
+source .venv/bin/activate                   # the wallet itself needs only the standard library
+export JAVA_HOME=/path/to/openjdk-21-home   # e.g. /usr/local/opt/openjdk@21 on Intel Homebrew
 export PATH="$HOME/.daml/bin:$JAVA_HOME/bin:$PATH"
 ```
 
@@ -545,10 +549,8 @@ without explicit disclosure — but it has not been tested across participants.
 **The refusals in the statement are not ledger records.** A rejected transaction commits
 nothing. They come from the demo's own log and are labelled as such on the page.
 
-**Pre-existing and unrelated:** `tests/test_backend.py` and `tests/test_optimizer.py` (the
-collateral optimizer's own tests, not this subproject's) fail on this machine because `numpy`
-is not installed in the `hack` venv. Unchanged by this work.
-`tests/test_agent_wallet.py` is 26/26.
+**Python tests:** `tests/test_agent_wallet.py` has 39 tests. With the root `requirements.txt`
+installed, the whole Python suite (72 tests, including the collateral optimiser's) passes.
 
 ### Canton Coin, when credentials arrive
 

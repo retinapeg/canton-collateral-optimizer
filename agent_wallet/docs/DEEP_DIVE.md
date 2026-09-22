@@ -10,7 +10,7 @@ Canton's approach: the agent **never holds authority over money**. The only path
 
 ## The Contract Architecture
 
-There are **5 templates** in [`AgentWallet.daml`](file:///Users/arkaj/Desktop/Hackathon/Oxford-Hack/canton-collateral-optimizer/agent_wallet/daml/AgentWallet.daml). Here's how they relate:
+There are **5 templates** in [`AgentWallet.daml`](../daml/AgentWallet.daml). Here's how they relate:
 
 ```mermaid
 graph TD
@@ -114,7 +114,7 @@ If these checks ran in Python, a buggy or malicious agent could simply skip them
 
 ## How Python Fits In (It Doesn't Decide Anything)
 
-The Python code in [`ledger.py`](file:///Users/arkaj/Desktop/Hackathon/Oxford-Hack/canton-collateral-optimizer/agent_wallet/ledger.py) is a **thin HTTP client**. It:
+The Python code in [`ledger.py`](../ledger.py) is a **thin HTTP client**. It:
 
 1. **Submits commands** to the Canton JSON Ledger API (`POST /v2/commands/submit-and-wait-for-transaction`)
 2. **Reads results** back from the API

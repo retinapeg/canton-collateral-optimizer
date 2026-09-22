@@ -38,6 +38,9 @@ incomplete build. Say plainly what is mocked.
 
 ## 2. Environment — verified on this machine 2026-08-29
 
+> This section records the wallet author's hackathon machine. For a portable setup, see the
+> root [`README.md`](../README.md).
+
 This is an **Intel Mac** (`uname -m` → `x86_64`). Homebrew lives at **`/usr/local`**.
 
 > ⚠️ The repo's `CLAUDE.md` and both project READMEs say `/opt/homebrew/...`. That is the
@@ -128,7 +131,7 @@ using `passTime`, not in the live demo.** Do not pretend otherwise in the README
 Always from `canton-collateral-optimizer/` unless stated. Always after the export block.
 
 ```bash
-cd /Users/arkaj/Desktop/Hackathon/Oxford-Hack/canton-collateral-optimizer
+cd /path/to/canton-collateral-optimizer
 source ../hack/bin/activate
 export JAVA_HOME=/usr/local/opt/openjdk@21
 export PATH="$HOME/.daml/bin:$JAVA_HOME/bin:$PATH"
@@ -223,9 +226,9 @@ Register it (Claude Code, Antigravity IDE, and Cursor all read this shape):
 {
   "mcpServers": {
     "agent-wallet": {
-      "command": "/Users/arkaj/Desktop/Hackathon/Oxford-Hack/hack/bin/python",
+      "command": "/path/to/venv/bin/python",
       "args": ["-m", "agent_wallet.mcp_server"],
-      "cwd": "/Users/arkaj/Desktop/Hackathon/Oxford-Hack/canton-collateral-optimizer",
+      "cwd": "/path/to/canton-collateral-optimizer",
       "env": { "AGENT_WALLET_BASE_URL": "http://localhost:7575" }
     }
   }
