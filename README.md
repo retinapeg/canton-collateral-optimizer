@@ -1,60 +1,117 @@
 # Canton Collateral Optimizer
 
-Privacy-preserving collateral optimisation across fragmented financial systems using Python for constrained optimisation and Daml/Canton for permissioned multi-party state, approvals and execution.
+Privacy-preserving collateral optimisation across fragmented financial systems
+using Python for constrained optimisation and Daml/Canton for permissioned
+multi-party state, approvals and execution.
 
-## Hackathon demo
+A hackathon prototype built at Oxford Hack in August 2026. A ledger-independent
+Python optimiser (`scipy.optimize.linprog`) finds the cheapest valid way to
+allocate collateral against institutions' requirements. A thin adapter then
+turns each allocation into a Daml propose-and-accept contract on a local Canton
+sandbox, where only the receiving party can accept and each bank sees only its
+own contracts. The repository also contains `agent_wallet/`, a spend-limited
+wallet for an AI agent built by a teammate (see [Who built what](#who-built-what)).
 
-From the repository root, the normal complete demo entrypoint is:
+## Results at a glance
+
+| What | Result | Reproduce / checked by |
+|---|---|---|
+| Illustrative greedy counter-example (two assets, two institutions) | greedy allocation scores 101.0; the global LP optimum scores 3.1 (about 96.9% lower) | `python -m optimizer`; `tests/test_optimizer.py`, `tests/test_allocation_demo.py` |
+| Two-bank sample market (`sample_data/market.json`) | both requirements covered (500 + 400 effective value) at total cost 4.5510 | `python -m optimizer sample_data/market.json`; `tests/test_optimizer.py` |
+| Python test suite | 72 tests pass: optimiser 11, Canton adapter 8, allocation demo 14, agent wallet 39 | `python -m pytest -q tests` |
+
+The Python tests run offline and do not need Canton. The Daml Script tests and
+the live ledger demo need DPM and Java (see
+[Prerequisites](#prerequisites-for-the-ledger-demo)).
+
+## Quick start
+
+Offline, with Python 3 (developed on 3.11):
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pytest -q tests              # 72 tests, no ledger needed
+.venv/bin/python -m optimizer                    # greedy 101.0 versus optimum 3.1
+```
+
+Full demo against a fresh local Canton sandbox:
 
 ```bash
 ./demo.sh
 ```
 
 No virtual-environment activation, `PATH` export, package-directory change, or
-separate Canton terminal is required. The launcher reuses the persistent local
-`.venv`, installs Python dependencies only when the manifest or environment has
-changed, discovers DPM, builds both Daml packages, starts a fresh owned Canton
-sandbox on dedicated ports, runs the optimiser-to-ledger workflow and wallet
-proof, and then waits for its entire sandbox process group to exit.
+separate Canton terminal is required. The launcher creates or reuses the
+repository-local `.venv`, installs Python dependencies only when
+`requirements.txt` or the environment has changed, discovers DPM and Java,
+builds both Daml packages, starts a fresh sandbox that it owns on dedicated
+ports (16865-16869 and 17575), loads both DARs, and then runs:
 
-An unrelated Canton instance on port 7575 is never reused or stopped. Local
-runtime logs are written under the gitignored `.run/` directory.
+1. `backend.allocation_demo`: the optimiser's two allocations are mapped to
+   ledger instructions (BankA sends 30 `US_TREASURY_2034` to BankB and 20
+   `UK_GILT_2035` to BankC) and created as `AllocationProposal` contracts; the
+   runner checks that BankA cannot exercise BankB's `Accept` choice, has each
+   recipient accept, queries the ledger and reconciles the result against the
+   optimiser output;
+2. `agent_wallet.demo`: the spend-limited wallet story and attack suite.
+
+It then stops its entire sandbox process group and writes
+`artifacts/demo_run.json` and `artifacts/demo_run.csv` (both gitignored). An
+unrelated Canton instance on port 7575 is never reused or stopped. Runtime logs
+go to the gitignored `.run/` directory.
 
 The optional root-level preparation and verification commands are:
 
 ```bash
-./setup_demo.sh
-./test_all.sh
+./setup_demo.sh   # toolchain check, .venv, dependencies, Daml builds
+./test_all.sh     # shell syntax, pytest, dpm test for both Daml packages, git diff --check
 ```
 
-The detailed commands later in this README remain useful for component-level
-development, but are not required for the complete hackathon demo.
+## Who built what
 
-## Collaboration
+- The collateral optimiser (`optimizer/`), the Canton adapter and demo runners
+  (`backend/`), the collateral Daml package (`daml/`) and the root launcher
+  scripts were written by the repository owner (git author `retinapeg`).
+- `agent_wallet/`, a spend-limited wallet for an AI agent (Oxford Hack Daml
+  track D1), was built by teammate Arkajyoti Saha, who also extended
+  `backend/canton.py` for it; see [`agent_wallet/README.md`](agent_wallet/README.md).
+  `./demo.sh` runs the wallet on the same sandbox as the collateral flow.
+- AI coding assistants were used during development.
+  [`agent_wallet/AGENTS.md`](agent_wallet/AGENTS.md) is the working brief
+  written for them on the wallet subproject; the root project's local assistant
+  metadata is gitignored (see `.gitignore`).
 
-This repository is private. Every collaborator must be explicitly invited to
-the repository before they can access it.
+## Repository layout
 
-Add a collaborator with write access (the default permission):
-
-```bash
-./scripts/add-collaborator.sh <github-username>
+```text
+optimizer/             ledger-independent linear optimiser
+backend/               thin Canton JSON Ledger API v2 client and the two demo runners
+daml/                  collateral Daml package (SDK 3.5.7) and Daml Script tests
+agent_wallet/          teammate's spend-limited AI-agent wallet (Daml SDK 3.4.10, Python, MCP server)
+tests/                 Python tests for the optimiser, adapter, allocation demo and wallet
+sample_data/           deterministic two-bank market
+scripts/               shared launcher helpers, plus add-collaborator.sh (grants a
+                       GitHub user access through the authenticated gh CLI)
+demo.sh                complete ledger demo
+setup_demo.sh          toolchain check, .venv, dependencies, Daml builds
+test_all.sh            full verification, including dpm test
+run_sim.sh             teammate's wallet-simulation helper; it hard-codes an Intel
+                       Homebrew OpenJDK 21 path and the legacy daml assistant
+INTEGRATION_STATUS.md  integration checklist kept during the hackathon
+.mcp.json              registers agent_wallet's MCP server for MCP-aware editors
 ```
 
-Specify write or read access explicitly:
+## The two collateral flows
 
-```bash
-./scripts/add-collaborator.sh <github-username> push
-./scripts/add-collaborator.sh <github-username> pull
-```
+Both runners share the optimiser and the Canton client:
 
-The helper also accepts `maintain` and `admin` when those higher permissions
-are deliberately required. It uses the authenticated GitHub CLI session and
-does not store credentials in the repository.
+| Runner | Daml module | Scenario | Started by |
+|---|---|---|---|
+| `backend.allocation_demo` | `CollateralAllocation` (`AllocationProposal`, `AllocatedCollateral`) | greedy counter-example; BankA allocates to BankB and BankC | `./demo.sh` |
+| `backend.demo` | `Collateral` (`CollateralOffer`, `CollateralRequirement`, `ReallocationProposal`, `CollateralAllocation`) | two-bank sample market with CCP requirements, residual offers and party-view privacy checks | manually, see [Component commands](#component-commands) |
 
-## Current status
-
-The minimum end-to-end slice is working:
+### First vertical slice: `backend.demo`
 
 1. BankA and BankB own private `CollateralOffer` contracts.
 2. Allocator is explicitly authorised as an observer and reads both banks'
@@ -80,8 +137,6 @@ The quantity sent to Daml is conservatively rounded upward to ten decimal
 places (`5.1020408164`), producing an on-ledger effective value of
 `500.0000000072` rather than rounding below the requirement.
 
-## Architecture
-
 ```text
 Daml contracts on Canton
   CollateralOffer + CollateralRequirement
@@ -103,34 +158,14 @@ Canton transaction
   + create CollateralAllocation
 ```
 
-Repository layout:
+## Toolchain
 
-```text
-daml/                  Daml templates and executable Daml Script tests
-optimizer/             ledger-independent linear optimiser
-backend/               thin Canton JSON Ledger API v2 adapter and demo runner
-tests/                 Python optimiser and mapping tests
-sample_data/           deterministic two-bank market
-frontend/              intentionally not created until the core is complete
-sources/               read-only synced project material; currently empty
-```
-
-## Environment audit and chosen tools
-
-The project initially contained no code or hackathon starter files. Python
-3.11.5, NumPy 1.26.0, and SciPy 1.11.3 were already available. Daml, Canton,
-Java, pytest, Node, and a running Docker daemon were not available.
-
-For the fastest credible path, this project now uses:
-
-- a repository-local Python virtual environment at `.venv`;
-- pinned NumPy 1.26.0 and SciPy 1.11.3 dependencies;
-- Digital Asset Package Manager (DPM) 3.5.7;
-- the DPM-bundled Canton Open Source Sandbox 3.5.14;
-- OpenJDK 17;
-- Python's built-in `unittest`, avoiding an unnecessary test dependency;
-- Python's built-in HTTP client, avoiding an unnecessary web framework or
-  third-party HTTP dependency;
+- Python 3 with NumPy, SciPy and pytest (`requirements.txt`); Python's
+  built-in HTTP client, with no web framework or third-party HTTP dependency;
+- Digital Asset Package Manager (DPM), using SDK 3.5.7 for `daml/` and 3.4.10
+  for `agent_wallet/` (the `sdk-version` in each `daml.yaml`);
+- the DPM-bundled Canton open-source sandbox (developed against 3.5.14);
+- OpenJDK 17 or 21;
 - Canton JSON Ledger API v2 rather than legacy JSON API v1 or generated gRPC
   bindings.
 
@@ -141,80 +176,68 @@ followed. The full Canton Network Quickstart was deliberately not adopted for
 this first slice: it brings Docker, Nix, Gradle, React, Keycloak, wallets,
 multiple validators, and substantially more startup risk than this demo needs.
 
-## One-time installation on this Mac
+## Prerequisites for the ledger demo
 
-These steps have already been completed on the current machine. They are here
-so the demo is reproducible:
+The root scripts (`scripts/demo_common.sh`) look for:
 
-```bash
-brew install openjdk@21
-curl -sSL https://get.daml.com/ -o get-daml.sh && sh get-daml.sh 3.4.10
-```
+- `python3` on `PATH`, used to create `.venv`;
+- DPM at `$HOME/.dpm/bin/dpm` or on `PATH` (or set `DEMO_DPM_BIN`); install it
+  by following the [DPM reference](https://docs.canton.network/sdks-tools/cli-tools/dpm);
+- Java: `$JAVA_HOME` if it contains `bin/java`; otherwise Homebrew OpenJDK 17,
+  then 21, under `/opt/homebrew/opt/openjdk@<version>/libexec/openjdk.jdk/Contents/Home`
+  and then the same path under `/usr/local/opt` (for example after
+  `brew install openjdk@17`);
+- `curl`, and `lsof` or `nc` for the port-safety check.
 
-Create the project-local Python environment and install the tested dependencies:
+## Component commands
 
-```bash
-# We use the 'hack' virtual environment created in the parent directory
-cd canton-collateral-optimizer
-source ../hack/bin/activate
-python -m pip install -r requirements.txt
-```
-
-For each new terminal, activate the virtual environment and expose Java and DPM:
+For the manual steps below, set up the same environment the scripts use, from
+the repository root:
 
 ```bash
-cd canton-collateral-optimizer
-source ../hack/bin/activate
-export JAVA_HOME=/opt/homebrew/opt/openjdk@21
-export PATH="$HOME/.daml/bin:$JAVA_HOME/bin:$PATH"
-```
+source .venv/bin/activate      # created by ./setup_demo.sh or the quick start
+export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
+# Intel Macs: /usr/local/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
+export PATH="$HOME/.dpm/bin:$JAVA_HOME/bin:$PATH"
 
-Check the installation:
-
-```bash
 java -version
-dpm version
+(cd daml && dpm version)
 ```
 
-Expected active SDK/toolchain version: `3.5.7`. (`dpm --version` reports the
-package-manager binary's separate version.)
+The active SDK reported inside `daml/` should be `3.5.7`. (`dpm --version`
+reports the package-manager binary's separate version.)
 
-## VS Code workflow
-
-Open this repository folder in VS Code and select `.venv/bin/python` as the
-Python interpreter. The local `.vscode/` folder is intentionally ignored because
-editor settings and task paths can be machine-specific. Use the tested commands
-below in the integrated terminal.
-
-## Exact commands: test, build, and run
-
-Run all commands below from the repository root unless a step explicitly changes
-directory.
+In VS Code, select `.venv/bin/python` as the interpreter. The local `.vscode/`
+folder is intentionally ignored because editor settings can be machine-specific.
 
 ### 1. Run the Python tests
 
 ```bash
+python -m pytest -q tests
+# or, with the standard library runner:
 python -m unittest discover -s tests -v
 ```
 
-The suite covers:
+The 72 tests cover, among other things:
 
 - no asset allocated above its available quantity;
 - every requirement satisfied;
 - ineligible asset classes never used;
-- the known cheapest solution;
+- the known cheapest solution, and the global optimum beating the greedy
+  counter-example (3.1 against 101.0);
 - clean `INFEASIBLE` output;
 - no double allocation across requirements;
 - no use of one bank's inventory for another bank's obligation;
 - deterministic sample output and JSON serialisability;
-- safe conversion to Daml's ten-decimal scale.
+- safe conversion to Daml's ten-decimal scale;
+- the optimiser-to-ledger mapping, recipient-only acceptance and
+  reconciliation in `backend.allocation_demo` (against a fake ledger client);
+- the wallet's encoding, error classification, statement rendering, simulated
+  workload and MCP tool schemas.
 
 ### 2. Build and test the Daml model
 
 ```bash
-export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
-export PATH="$HOME/.dpm/bin:/opt/homebrew/opt/openjdk@17/bin:$PATH"
-
 cd daml
 dpm build
 dpm test
@@ -230,16 +253,12 @@ daml/.daml/dist/collateral-optimizer-0.0.1.dar
 `dpm test` executes the privacy, controller-authorisation, residual-offer,
 acceptance, and stale-proposal assertions on Daml's IDE ledger.
 
-### 3. Start the real Canton Sandbox
+### 3. Start a Canton sandbox for `backend.demo`
 
-Keep this command running in terminal 1:
+Keep this command running in terminal 1 (with the environment above):
 
 ```bash
 cd daml
-
-export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
-export PATH="$HOME/.dpm/bin:/opt/homebrew/opt/openjdk@17/bin:$PATH"
-
 dpm sandbox \
   --json-api-port 7575 \
   --dar .daml/dist/collateral-optimizer-0.0.1.dar
@@ -269,7 +288,7 @@ The backend also retries the one known transient case where the HTTP service is
 live but party allocation begins just before the participant finishes connecting
 to the synchronizer.
 
-### 4. Run the entire Python → Canton → Daml demo
+### 4. Run the Python -> Canton -> Daml slice
 
 In terminal 2:
 
@@ -308,7 +327,7 @@ The runner intentionally refuses to execute when active proposals or
 allocations already exist. Stop the Sandbox with `Ctrl-C`, restart it, and run
 the command again for a clean deterministic demonstration.
 
-## Optional: run the full Daml proof against Canton itself
+### Optional: run the full Daml proof against Canton itself
 
 This is separate from `dpm test`. It submits the same privacy and acceptance
 script to a live Canton Sandbox over the gRPC Ledger API.
@@ -317,10 +336,6 @@ Start a **fresh** Sandbox as described above, then run in terminal 2:
 
 ```bash
 cd daml
-
-export JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
-export PATH="$HOME/.dpm/bin:/opt/homebrew/opt/openjdk@17/bin:$PATH"
-
 dpm script \
   --dar .daml/dist/collateral-optimizer-0.0.1.dar \
   --script-name Demo:privacyAndAcceptance \
@@ -332,27 +347,27 @@ Use a different fresh Sandbox for `python -m backend.demo`. The Daml proof
 allocates the same four party hints and deliberately leaves proposal/allocation
 test state; the Python runner rejects any pre-existing proposal/allocation state.
 
-## Ninety-second demonstration script
+### Reading the `backend.demo` output
 
-1. Point to `before_optimisation.BankA` and `before_optimisation.BankB` in the
-   output: each bank has only its own offers and requirement.
-2. Point to `before_optimisation.Allocator`: it has all five authorised offers
-   and both requirements.
-3. Point to `optimisation`: status is `OPTIMAL`, both coverage checks are true,
-   and total cost is `4.551020408163265`.
-4. Point to `private_proposals`: BankA sees only `A-GILT-2030`; BankB sees only
+1. `before_optimisation.BankA` and `before_optimisation.BankB`: each bank has
+   only its own offers and requirement.
+2. `before_optimisation.Allocator`: it has all five authorised offers and both
+   requirements.
+3. `optimisation`: status is `OPTIMAL`, both coverage checks are true, and total
+   cost is `4.551020408163265`.
+4. `private_proposals`: BankA sees only `A-GILT-2030`; BankB sees only
    `B-CORP-2029`.
-5. Point to `bank_a_accepted`: BankA authorised 5.1020408164 units and Canton
-   recorded 500.0000000072 effective value.
-6. Point to `after_acceptance.BankA`: the allocation and residual offer exist;
-   the proposal is gone.
-   `bank_a_residual_offers` shows the remaining quantity is exactly
-   `4.8979591836`.
-7. Point to `after_acceptance.BankB`: BankB still sees only its own offer,
-   requirement, and proposal—no BankA allocation.
-8. Close with the one-line pitch at the top of this README.
+5. `bank_a_accepted`: BankA authorised 5.1020408164 units and Canton recorded
+   500.0000000072 effective value.
+6. `after_acceptance.BankA`: the allocation and residual offer exist; the
+   proposal is gone. `bank_a_residual_offers` shows the remaining quantity is
+   exactly `4.8979591836`.
+7. `after_acceptance.BankB`: BankB still sees only its own offer, requirement,
+   and proposal, and no BankA allocation.
 
 ## Daml ownership, visibility, and execution
+
+In the `Collateral` module used by `backend.demo`:
 
 | Contract | Signatory | Observers | Intended visibility |
 |---|---|---|---|
@@ -374,6 +389,11 @@ If two proposals refer to the same offer contract ID, accepting one consumes
 that offer. The second proposal becomes stale and fails. This makes Canton
 responsible for stale-state and double-use protection even if an off-ledger
 client is buggy or out of date.
+
+In the `CollateralAllocation` module used by `./demo.sh`, an
+`AllocationProposal` is signed by the source bank with the recipient as
+observer, and its `Accept` choice is `controller recipient`. The resulting
+`AllocatedCollateral` is signed by both source and recipient.
 
 ## Optimisation interface and mathematics
 
@@ -465,11 +485,14 @@ The backend deliberately uses only a small JSON Ledger API v2 surface:
 - `GET /v2/state/ledger-end`
 - `GET /v2/parties`
 - `POST /v2/parties`
-- `POST /v2/state/active-contracts-page`
+- `POST /v2/state/active-contracts-page`, falling back to
+  `POST /v2/state/active-contracts` when the paged route returns 404 (Canton
+  3.4, used by the wallet package)
 - `POST /v2/commands/submit-and-wait-for-transaction`
 
-The DAR is supplied directly to `dpm sandbox`, so no separate package-upload
-endpoint is required.
+For the manual `backend.demo` flow the DAR is supplied directly to
+`dpm sandbox`. `./demo.sh` instead loads both DARs into its own sandbox with
+`POST /v2/packages`.
 
 ## Privacy claim: precise wording
 
@@ -499,8 +522,8 @@ slice.
 
 ## Deliberate first-slice limits
 
-- No frontend. The machine-readable terminal output is the demo surface until
-  the core flow is stable.
+- No frontend for the collateral flow. The machine-readable terminal output is
+  the demo surface (the wallet's `agent_wallet/serve.py` page is separate).
 - No market shock or re-optimisation workflow yet.
 - No reinforcement learning.
 - A requirement remains active after one allocation. The demo runner refuses
@@ -525,8 +548,8 @@ slice.
   bank gives its authority when it accepts the resulting allocation. Making the
   requirement itself bilateral would require another invite/accept flow.
 - The Daml script dependency lives in the same DAR for hackathon speed, so the
-  compiler emits a harmless package-store-size warning. Split tests into a
-  second package only after the demo.
+  compiler emits a harmless package-store-size warning. Moving the tests into a
+  second package would remove it.
 
 ## Official references
 
