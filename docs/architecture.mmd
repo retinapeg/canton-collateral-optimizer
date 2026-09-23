@@ -1,5 +1,5 @@
 %% Architecture of canton-collateral-optimizer at commit 277896d39d2915297e16e08a65a63059d71ae6b9
-%% Sources: optimizer/__main__.py, optimizer/engine.py, backend/allocation_demo.py, backend/demo.py, backend/canton.py, daml/daml/CollateralAllocation.daml, daml/daml/Collateral.daml, demo.sh, sample_data/market.json, agent_wallet/mcp_server.py, agent_wallet/demo.py, agent_wallet/ledger.py, agent_wallet/world.py, .mcp.json, tests/test_allocation_demo.py, tests/test_backend.py, tests/test_agent_wallet.py
+%% Sources: optimizer/__main__.py, optimizer/engine.py, backend/allocation_demo.py, backend/demo.py, backend/canton.py, daml/daml/CollateralAllocation.daml, daml/daml/Collateral.daml, demo.sh, sample_data/market.json, agent_wallet/mcp_server.py, agent_wallet/demo.py, agent_wallet/ledger.py, agent_wallet/world.py, .mcp.json, tests/test_optimizer.py, tests/test_allocation_demo.py, tests/test_backend.py, tests/test_agent_wallet.py, test_all.sh
 %% Render: npx @mermaid-js/mermaid-cli -i docs/architecture.mmd -o docs/images/architecture.svg -b white
 flowchart TD
     IN[("Synthetic inputs<br/>market.json, 2x2 example")]
@@ -12,7 +12,7 @@ flowchart TD
     OUT[("Terminal report +<br/>artifacts/demo_run.*")]
     TEST["tests/: 72 pytest<br/>(fake ledger) + dpm test"]
     WALLET["agent_wallet/ (teammate)<br/>MCP server + demo"]
-    EXTC["External MCP client<br/>(any LLM, not in repo)"]
+    EXTC["External MCP client<br/>(e.g. LLM agent, not in repo)"]
 
     IN --> RUN
     OP --> RUN
