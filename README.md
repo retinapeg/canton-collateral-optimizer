@@ -12,6 +12,38 @@ sandbox, where only the receiving party can accept and each bank sees only its
 own contracts. The repository also contains `agent_wallet/`, a spend-limited
 wallet for an AI agent built by a teammate (see [Who built what](#who-built-what)).
 
+<p align="center">
+  <img src="docs/images/optimizer_run.png" width="560" alt="Terminal capture of python -m optimizer: the greedy example costs 101.0 against a global optimum of 3.1, and on sample_data/market.json both requirements are covered at a total cost of 4.551 with status OPTIMAL">
+</p>
+
+*Captured offline output of `python -m optimizer` and `python -m optimizer sample_data/market.json`, with no ledger running (raw text: [`docs/images/optimizer_run.txt`](docs/images/optimizer_run.txt)); both inputs are synthetic, illustrative data.*
+
+## System architecture
+
+![System architecture: runners load synthetic inputs and call the scipy linprog optimiser; a backend adapter turns the plan into Daml commands sent through a JSON Ledger API v2 client to a local Canton sandbox; agent_wallet reuses the same client](docs/images/architecture.svg)
+
+*Purple: model call · blue: deterministic code · green: human · amber: evaluation · grey: storage · dashed: external, optional, mocked or planned*
+
+A runner (the `python -m optimizer` CLI, `backend.allocation_demo` started by
+`./demo.sh`, or the manual `backend.demo`) loads a synthetic scenario and passes
+plain dictionaries to `optimizer/engine.py`, which solves one linear programme
+with `scipy.optimize.linprog` (HiGHS) and returns an allocation plan. The CLI
+stops there and prints the plan; the backend runners map each allocation to a
+Daml propose-and-accept command, submit it through `backend/canton.py` to a
+local Canton sandbox, have the controlling party accept, and then query each
+party's view and reconcile it against the plan (`backend.demo` first seeds
+`sample_data/market.json` onto the ledger and optimises the Allocator's
+authorised view of it). The teammate's `agent_wallet/` reuses the same Canton
+client and exposes its wallet as tools to MCP clients.
+
+## Does it use AI at runtime?
+
+No. The optimiser is a deterministic linear programme and no model, LLM or
+learned policy is called anywhere in the code; `agent_wallet/mcp_server.py`
+only exposes wallet tools that an external MCP client (possibly an LLM agent)
+may call, while its own demo agent is scripted and every spending limit is
+enforced by Daml on the ledger.
+
 ## Results at a glance
 
 | What | Result | Reproduce / checked by |

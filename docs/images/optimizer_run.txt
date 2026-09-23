@@ -1,0 +1,52 @@
+$ python -m optimizer
+GLOBAL COLLATERAL OPTIMIZER
+
+Greedy/local example cost: 101.0
+
+Global allocation:
+Asset2 -> InstitutionB: 1.0
+Asset1 -> InstitutionC: 1.0
+
+Global optimum cost: 3.1
+Savings vs local allocation: 97.9
+
+OPTIMIZER PASS
+
+$ python -m optimizer sample_data/market.json
+{
+  "allocations": [
+    {
+      "asset_id": "A-GILT-2030",
+      "cost": 2.5510204081632653,
+      "effective_value": 500.0,
+      "owner": "BankA",
+      "quantity": 5.1020408163265305,
+      "requirement_id": "REQ-BANK-A-CCP"
+    },
+    {
+      "asset_id": "B-CORP-2029",
+      "cost": 2.0,
+      "effective_value": 400.0,
+      "owner": "BankB",
+      "quantity": 5.0,
+      "requirement_id": "REQ-BANK-B-CCP"
+    }
+  ],
+  "message": "Optimal collateral allocation found",
+  "requirement_coverage": [
+    {
+      "allocated_effective_value": 500.0,
+      "required_effective_value": 500.0,
+      "requirement_id": "REQ-BANK-A-CCP",
+      "satisfied": true
+    },
+    {
+      "allocated_effective_value": 400.0,
+      "required_effective_value": 400.0,
+      "requirement_id": "REQ-BANK-B-CCP",
+      "satisfied": true
+    }
+  ],
+  "status": "OPTIMAL",
+  "total_cost": 4.551020408163265
+}

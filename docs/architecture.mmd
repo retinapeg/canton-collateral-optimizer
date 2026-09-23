@@ -1,0 +1,44 @@
+%% Architecture of canton-collateral-optimizer at commit 277896d39d2915297e16e08a65a63059d71ae6b9
+%% Sources: optimizer/__main__.py, optimizer/engine.py, backend/allocation_demo.py, backend/demo.py, backend/canton.py, daml/daml/CollateralAllocation.daml, daml/daml/Collateral.daml, demo.sh, sample_data/market.json, agent_wallet/mcp_server.py, agent_wallet/demo.py, agent_wallet/ledger.py, agent_wallet/world.py, .mcp.json, tests/test_allocation_demo.py, tests/test_backend.py, tests/test_agent_wallet.py
+%% Render: npx @mermaid-js/mermaid-cli -i docs/architecture.mmd -o docs/images/architecture.svg -b white
+flowchart TD
+    IN[("Synthetic inputs<br/>market.json, 2x2 example")]
+    OP(["Operator runs ./demo.sh,<br/>backend.demo or the CLI"])
+    RUN["Runners load scenario<br/>CLI main, backend demos"]
+    OPT["optimizer/engine.py<br/>scipy linprog (HiGHS)"]
+    ADAPT["backend adapter<br/>plan to Daml, reconcile"]
+    CC["backend/canton.py<br/>JSON Ledger API v2"]
+    LEDGER["Local Canton sandbox<br/>Daml propose/accept<br/>(needs DPM + Java)"]
+    OUT[("Terminal report +<br/>artifacts/demo_run.*")]
+    TEST["tests/: 72 pytest<br/>(fake ledger) + dpm test"]
+    WALLET["agent_wallet/ (teammate)<br/>MCP server + demo"]
+    EXTC["External MCP client<br/>(any LLM, not in repo)"]
+
+    IN --> RUN
+    OP --> RUN
+    RUN -->|"market or matrix"| OPT
+    OPT -->|"allocation plan"| ADAPT
+    OPT -->|"CLI prints plan"| OUT
+    ADAPT -->|"create, exercise, query"| CC
+    CC <-->|"HTTP"| LEDGER
+    ADAPT -->|"reconciled result"| OUT
+    TEST -.->|"offline checks"| OPT
+    TEST -.-> ADAPT
+    OP -->|"./demo.sh"| WALLET
+    EXTC -.->|"stdio JSON-RPC tools"| WALLET
+    WALLET -->|"reuses client"| CC
+
+    class OP human;
+    class IN mock;
+    class RUN,OPT,ADAPT,CC,WALLET det;
+    class LEDGER,EXTC ext;
+    class OUT store;
+    class TEST eval;
+
+    classDef ai fill:#efe7fb,stroke:#6a4c93,stroke-width:2px,color:#2b1d45;
+    classDef det fill:#eef3f8,stroke:#2f5d8a,stroke-width:1.5px,color:#172c37;
+    classDef human fill:#e8f0ec,stroke:#285b48,stroke-width:1.5px,color:#173f32;
+    classDef eval fill:#f7efdf,stroke:#8b6330,stroke-width:1.5px,color:#4a3413;
+    classDef store fill:#f3f4f1,stroke:#65757b,stroke-width:1.5px,color:#172c37;
+    classDef ext fill:#ffffff,stroke:#2f5d8a,stroke-width:1.5px,stroke-dasharray:4 3,color:#172c37;
+    classDef mock fill:#ffffff,stroke:#9aa5a8,stroke-width:1.5px,stroke-dasharray:6 4,color:#65757b;
