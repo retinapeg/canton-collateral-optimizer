@@ -15,7 +15,7 @@ that day.
 
 ## IN PROGRESS
 
-- Parallel-agent changes remain integration-sensitive; re-run the checks above whenever optimiser, backend mapping, Daml templates, sample data or package/toolchain configuration changes.
+- Changes to any one component remain integration-sensitive; re-run the checks above whenever optimiser, backend mapping, Daml templates, sample data or package/toolchain configuration changes.
 
 ## BROKEN
 

@@ -51,6 +51,6 @@ service-account*.json
 .vscode/
 .idea/
 
-# Local Codex project metadata and synced reference material
+# Local project notes and synced reference material
 /AGENTS.md
 /sources/

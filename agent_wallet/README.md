@@ -582,7 +582,7 @@ statement.py            receipts -> terminal and a self-contained HTML page
 serve.py                a browsable wallet on 7575, proxying Canton on 7576
 mcp_server.py           stdio MCP server; a language model holds the wallet
 docs/architecture.html  illustrated walkthrough of the design
-AGENTS.md               environment, commands and rationale, for any IDE or agent
+AGENTS.md               environment, commands and rationale for the subproject
 ../tests/test_agent_wallet.py   26 pure-Python tests, no ledger
 ```
 

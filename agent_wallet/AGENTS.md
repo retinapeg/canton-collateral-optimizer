@@ -1,8 +1,7 @@
 # AGENTS.md — spend-limited wallet for an AI agent (Oxford Hack track D1)
 
-Instructions for any AI assistant or IDE working on this subproject: Claude Code,
-Antigravity IDE, Cursor, or a human reading it cold. Everything needed to build, test and
-demo this is here. Read it before touching anything.
+Working notes for anyone building, testing or demoing this subproject. Everything needed
+to build, test and demo this is here. Read it before touching anything.
 
 ---
 
@@ -43,7 +42,7 @@ incomplete build. Say plainly what is mocked.
 
 This is an **Intel Mac** (`uname -m` → `x86_64`). Homebrew lives at **`/usr/local`**.
 
-> ⚠️ The repo's `CLAUDE.md` and both project READMEs say `/opt/homebrew/...`. That is the
+> ⚠️ Both project READMEs say `/opt/homebrew/...`. That is the
 > Apple-Silicon prefix and **does not exist here**. Every command below uses
 > `/usr/local`. If a doc tells you `/opt/homebrew`, the doc is wrong for this machine.
 
@@ -73,7 +72,7 @@ with `--no-legacy-assistant-warning` if it gets noisy.
 | **openjdk@17** (only `openjdk@21` is in `/usr/local/Cellar`) | the parent project's documented Java 17 step |
 | **Docker daemon** (down; LocalNet wants 16 GB RAM + ~6 GB images) | Canton LocalNet |
 | **`C8_CLIENT_SECRET`** (issued by the Cantor8 team on the day) | shared DevNet, and therefore real Canton Coin |
-| `canton-collateral-optimizer/.venv` | does not exist — this project actually uses `../hack`, matching its README, not `CLAUDE.md` |
+| `canton-collateral-optimizer/.venv` | does not exist — this project actually uses `../hack`, matching its README |
 
 ### Toolchain decision for this subproject — read this before "fixing" anything
 
@@ -375,7 +374,7 @@ to the compiler.
 
 | # | Work | Done when |
 |---|---|---|
-| 0 | `AGENTS.md`, fix `CLAUDE.md` paths, scaffold, `daml.yaml` | `daml build` succeeds |
+| 0 | `AGENTS.md`, scaffold, `daml.yaml` | `daml build` succeeds |
 | 1 | `Account`, `Payment`, `SpendingAuthority`, `Mandate` (total cap, allow-list, expiry, kill switch, receipt), `MandateProposal` | `daml build` green |
 | 2 | `Test.daml` cases 1–10, 12–14 below | `daml test` green |
 | 3 | Per-period cap + case 11 | `daml test` green |

@@ -103,16 +103,22 @@ The optional root-level preparation and verification commands are:
 ## Who built what
 
 - The collateral optimiser (`optimizer/`), the Canton adapter and demo runners
-  (`backend/`), the collateral Daml package (`daml/`) and the root launcher
-  scripts were written by the repository owner (git author `retinapeg`).
+  (`backend/`), the collateral Daml package (`daml/`), their Python tests
+  (`tests/test_optimizer.py`, `tests/test_backend.py`,
+  `tests/test_allocation_demo.py`) and the root launcher scripts are the
+  repository owner's work (git author `retinapeg`).
 - `agent_wallet/`, a spend-limited wallet for an AI agent (Oxford Hack Daml
   track D1), was built by teammate Arkajyoti Saha, who also extended
   `backend/canton.py` for it; see [`agent_wallet/README.md`](agent_wallet/README.md).
   `./demo.sh` runs the wallet on the same sandbox as the collateral flow.
-- AI coding assistants were used during development.
-  [`agent_wallet/AGENTS.md`](agent_wallet/AGENTS.md) is the working brief
-  written for them on the wallet subproject; the root project's local assistant
-  metadata is gitignored (see `.gitignore`).
+- The collateral flow's design decisions and their limits are recorded in this
+  README: the LP formulation ([Optimisation interface and
+  mathematics](#optimisation-interface-and-mathematics)), the JSON Ledger API v2
+  and a local sandbox rather than the full Quickstart
+  ([Toolchain](#toolchain)), the scoped privacy claim ([Privacy claim: precise
+  wording](#privacy-claim-precise-wording)) and the known gaps ([Deliberate
+  first-slice limits](#deliberate-first-slice-limits)). The checks run against a
+  live sandbox are recorded in [`INTEGRATION_STATUS.md`](INTEGRATION_STATUS.md).
 
 ## Repository layout
 
